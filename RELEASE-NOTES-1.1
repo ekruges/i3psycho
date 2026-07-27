@@ -1,0 +1,51 @@
+i3psycho 1.1
+============
+
+Auto-hiding bars, and the fixes from putting 1.0 on a real desktop that
+already had an i3 config.
+
+New:
+ - psychod --auto-hide-bars top|bottom|top,bottom parks the bar off-screen
+   and slides it back when the pointer touches that edge. --bar-slide-ms
+   sets the duration (140 default, 0 disables), --bar-class picks the bars.
+   Needs an override-redirect bar (polybar `override-redirect = true`,
+   i3bar `mode hide`); such a bar reserves no space, so windows get the
+   whole output.
+ - i3psycho-doctor inspects a live session and prints the line to fix each
+   finding: patched i3 installed but not restarted, psychod down after a
+   reload, bindings overridden in either direction, for_window rules
+   fighting the cascade, windows with no titlebar, wrong bar for chips.
+ - contrib/psycho-chips-polybar.py renders the minimized-window chips on
+   polybar, which cannot read i3bar's.
+
+psychod fixes:
+ - hot corners were tested against the X root window, the bounding box of
+   all outputs. On a 3000x2000 laptop plus a 1024x768 panel at +3000 the
+   default br=showdesktop needed 4022,1998 -- a point on neither screen.
+   Corners now belong to the output under the pointer.
+ - a sideways drag of a full-height window read as a corner and snapped to
+   a quarter instead of a half. The dominant axis wins now.
+ - the window_type skip never fired (i3ipc does not map the field), so
+   dialogs and splashes were cascaded instead of left alone.
+ - the cascade raced the rest of the config: window::floating fires mid
+   assignment batch, so a later `move position center` overwrote placement.
+   window::new is the authoritative point.
+
+psycho.conf:
+ - forces a titlebar (`border normal 2`). Apps suppress decoration through
+   _MOTIF_WM_HINTS and i3 honors it, most often terminals -- no titlebar
+   means nowhere to draw the buttons.
+ - MRU cycle and expose moved off $mod+Tab and $mod+e, the binds most
+   likely already taken. Uncomment to restore.
+ - lists the keys it claims; says the include goes at the bottom and needs
+   a restart, not a reload.
+
+Packaging:
+ - mkpkgfiles.sh copied from a docs/ directory that does not exist, so it
+   staged nothing and makepkg failed.
+ - PKGBUILD had 17 sources against 16 sha256sums, which makepkg rejects.
+ - build-i3psycho.sh built whatever was on master and pre-flighted the
+   series with `git apply --check`, which rejects patches that touch a file
+   an earlier patch changed. Both paths now pin the 4.25.1 tag.
+ - test/phase*.sh chmod'd a psychod-status that does not exist, so every
+   phase aborted at line 10 under set -e.

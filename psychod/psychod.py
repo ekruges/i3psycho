@@ -26,7 +26,17 @@ ap.add_argument("--edge-margin", type=int, default=25,
 ap.add_argument("--drop-debounce", type=float, default=0.25)
 ap.add_argument("--hot-corners", default="tl=expose,br=showdesktop",
                 help='corner=action pairs ("tl=expose,br=showdesktop"), or "none"')
+ap.add_argument("--auto-hide-bars", default="none",
+                help='edges whose bar hides until hovered: "top", "bottom", '
+                     '"top,bottom", or "none"')
+ap.add_argument("--bar-class", default="polybar|i3bar",
+                help="X class regex matching the bars to auto-hide")
+ap.add_argument("--bar-slide-ms", type=int, default=140,
+                help="slide duration, ms; 0 snaps with no animation")
 ARGS = ap.parse_args()
+
+AUTOHIDE = {e.strip() for e in ARGS.auto_hide_bars.split(",")
+            if e.strip() in ("top", "bottom")}
 
 HOT_CORNERS = {}
 if ARGS.hot_corners != "none":
@@ -247,10 +257,8 @@ def cascade(con, force=False):
     c = tree.find_by_id(con.id)
     if c is None or floating_parent(c) is None:
         return
-    # i3ipc's Con class never maps window_type, so getattr() always returned
-    # None here and this skip was dead code: dialogs and splashes got yanked
-    # into the cascade instead of being left where the app put them. The
-    # field is only in the raw IPC dict.
+    # i3ipc's Con never maps window_type, so getattr() was always None and this
+    # skip was dead code -- dialogs got cascaded. only the raw dict has it.
     wtype = c.ipc_data.get("window_type")
     if wtype in ("dialog", "utility", "splash", "notification", "dock"):
         return
@@ -276,11 +284,9 @@ def cascade(con, force=False):
 
 
 def on_new(_, e):
-    # `floating enable` from a for_window rule fires window::floating mid-way
-    # through the assignment batch, so on_floating cascades before the rest of
-    # the batch runs -- and a later `move position center` rule then overwrites
-    # it. window::new is emitted after the whole batch, so it is the
-    # authoritative placement point, so force past the spent guard.
+    # window::floating fires mid assignment batch, so on_floating cascades
+    # before a later `move position center` overwrites it. window::new comes
+    # after the whole batch: the authoritative point, so force past the guard.
     cascade(e.container, force=True)
 
 
@@ -340,6 +346,7 @@ def drop_worker():
     moving = {}    # leaf id -> last time the rect changed
     hidden = set()  # leaf ids currently in the scratchpad
     hot = {"corner": None, "since": 0.0, "armed": True}
+    bar_scan = [0.0]
     interval = 0.6
     failures = 0
     while True:
@@ -357,11 +364,16 @@ def drop_worker():
                 failures = 0
             continue
         now = time.monotonic()
-        if HOT_CORNERS:
-            poll_hot_corner(wconn, hot, output_rects(tree), now)
+        if HOT_CORNERS or AUTOHIDE:
+            rects = output_rects(tree)
+            if AUTOHIDE and now - bar_scan[0] > 2.0:
+                bar_scan[0] = now
+                discover_bars(rects)
+            poll_hot_corner(wconn, hot, rects, now)
         # butter: poll fast only while something is (or just was) moving
         active = bool(moving) or any(now - t < 1.0 for t in moving_hint.values())
-        interval = 0.15 if active else 0.6
+        # a hidden bar has to answer the pointer, so idle cannot be 0.6s here
+        interval = 0.15 if active else (0.2 if AUTOHIDE else 0.6)
         if len(moving_hint) > 64:
             moving_hint.clear()
         seen = set()
@@ -407,9 +419,83 @@ def drop_worker():
 
 
 def output_rects(tree):
-    """Rect of every active output. Corners belong to a screen, not to the X
-    root window that happens to enclose all of them."""
+    """Rect of every active output."""
     return [o.rect for o in tree.nodes if o.name != "__i3" and o.rect.width]
+
+
+bars = {}                                   # wid -> geometry + hidden/shown
+
+
+def bar_y(b, shown):
+    if b["edge"] == "top":
+        return b["top"] if shown else b["top"] - b["h"]
+    return b["bot"] - b["h"] if shown else b["bot"]
+
+
+def slide(wid, show):
+    """Animate the bar in or out. i3 owns the placement of dock clients and
+    reverts any move, so the bar must be override-redirect for this to hold:
+    polybar `override-redirect = true`, i3bar `mode hide`."""
+    b = bars[wid]
+    y0, y1 = bar_y(b, b["shown"]), bar_y(b, show)
+    b["shown"] = show
+    steps = max(1, ARGS.bar_slide_ms // 20)
+    for i in range(1, steps + 1):
+        move_bar(wid, b["x"], y0 + (y1 - y0) * i // steps)
+        if i < steps:
+            time.sleep(ARGS.bar_slide_ms / steps / 1000.0)
+
+
+def move_bar(wid, x, y):
+    try:
+        subprocess.run(["xdotool", "windowmove", str(wid), str(x), str(y)],
+                       capture_output=True, timeout=1)
+    except Exception:
+        pass
+
+
+def discover_bars(rects):
+    try:
+        found = subprocess.run(["xdotool", "search", "--class", ARGS.bar_class],
+                               capture_output=True, text=True, timeout=1).stdout.split()
+    except Exception:
+        return
+    live = set()
+    for wid in found:
+        try:
+            g = subprocess.run(["xdotool", "getwindowgeometry", "--shell", wid],
+                               capture_output=True, text=True, timeout=1).stdout
+            d = dict(ln.split("=", 1) for ln in g.strip().splitlines() if "=" in ln)
+            x, y, h = int(d["X"]), int(d["Y"]), int(d["HEIGHT"])
+        except Exception:
+            continue
+        r = next((o for o in rects if o.x <= x < o.x + o.width), None)
+        if r is None or h > r.height // 4:      # too tall to be a bar
+            continue
+        live.add(wid)
+        if wid in bars:
+            continue
+        edge = "top" if y + h // 2 < r.y + r.height // 2 else "bottom"
+        if edge not in AUTOHIDE:
+            continue
+        bars[wid] = {"edge": edge, "h": h, "x": r.x,
+                     "top": r.y, "bot": r.y + r.height, "shown": True}
+        slide(wid, False)                       # bars start hidden
+    for wid in list(bars):
+        if wid not in live:
+            del bars[wid]
+
+
+def poll_bars(x, y):
+    for wid, b in bars.items():
+        if b["edge"] == "top":
+            near, away = y <= b["top"], y > b["top"] + b["h"] + 8
+        else:
+            near, away = y >= b["bot"] - 1, y < b["bot"] - b["h"] - 8
+        if near and not b["shown"]:
+            slide(wid, True)
+        elif away and b["shown"]:
+            slide(wid, False)
 
 
 def poll_hot_corner(wconn, st, rects, now):
@@ -421,13 +507,12 @@ def poll_hot_corner(wconn, st, rects, now):
         x, y = int(pos["X"]), int(pos["Y"])
     except Exception:
         return
-    # Corners used to be tested against the whole X root window, which is the
-    # bounding box of every monitor. With two side-by-side outputs of different
-    # heights that makes most corners unreachable: on a 3000x2000 laptop plus a
-    # 1024x768 screen at +3000, the root is 4024x2000, so "bottom-right" wants
-    # x >= 4022 and y >= 1998 -- x only reaches that on the short output, where
-    # y stops at 767. The default br=showdesktop corner could never fire. Test
-    # against the output the pointer is on, so every screen has four corners.
+    if AUTOHIDE:
+        poll_bars(x, y)
+    # against the output under the pointer, not the root window: the root is the
+    # bounding box of every monitor, so on mismatched outputs most corners are
+    # unreachable (3000x2000 + 1024x768 at +3000 puts "br" at 4022,1998, which
+    # is on neither screen, and the default br=showdesktop never fired)
     r = next((o for o in rects
               if o.x <= x < o.x + o.width and o.y <= y < o.y + o.height), None)
     if r is None:
@@ -459,10 +544,8 @@ def evaluate_drop(wconn, fc, leaf, wa):
     over_b = (fc.rect.y + fc.rect.height) - (wa.y + wa.height + m)
     horiz = max(over_l, over_r, 0)
     vert = max(over_t, over_b, 0)
-    # A window as tall as the workarea overhangs the cross axis by a few px on
-    # any sideways drag, which read as a corner and snapped it to a quarter.
-    # Only call it a corner when both axes overflow comparably; otherwise the
-    # dominant axis wins and a half stays a half.
+    # a full-height window overhangs the cross axis on any sideways drag, which
+    # read as a corner; only a corner when both axes overflow comparably
     if horiz and vert:
         if vert * 2 < horiz:
             vert = 0

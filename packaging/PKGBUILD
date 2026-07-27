@@ -1,12 +1,12 @@
 # Maintainer: Ezra Kruger <kruger.ezra.s@gmail.com>
-# i3psycho: floating-first i3. Patched i3 (4 patches on upstream master) +
+# i3psycho: floating-first i3. Patched i3 (7 patches on a pinned upstream) +
 # the psychod companion daemon. Follows the i3-gaps packaging model.
 pkgname=i3psycho
 pkgver=0.1.0
 pkgrel=1
 pkgdesc="i3 for psychopaths: floating-first i3 with macOS-grade window behavior"
 arch=('x86_64')
-url="https://github.com/ekruges/i3psycho-wip"
+url="https://github.com/ekruges/i3psycho"
 license=('BSD')
 provides=('i3-wm')
 conflicts=('i3-wm' 'i3-gaps')
@@ -15,10 +15,14 @@ depends=('libxcb' 'xcb-util-keysyms' 'xcb-util-wm' 'xcb-util-cursor'
          'perl' 'python-i3ipc' 'xdotool')
 makedepends=('git' 'meson' 'asciidoc')
 optdepends=('picom: tear-free moves (use the shipped vsync-only config)'
-            'i3status: default statusline wrapped by psychod-status')
-# pin the upstream commit the patch series is based on; bump together
-_i3_commit=f7d5b898
-source=("i3::git+https://github.com/i3/i3#commit=${_i3_commit}"
+            'i3status: default statusline for the i3bar entry path')
+# Pin the upstream base the series is verified against. This was an untagged
+# master commit, so `makepkg` built a different tree every time upstream moved
+# and there was no released i3 the result corresponded to. 4.25.1 is a tag: the
+# series applies and builds clean on it, and build-i3psycho.sh pins the same
+# thing so the two paths produce the same binary. Bump both together.
+_i3_tag=4.25.1
+source=("i3::git+https://github.com/i3/i3#tag=${_i3_tag}"
         '0001-ipc-emit-window-move-events-for-floating-repositions.patch'
         '0002-decorations-titlebar-buttons-double-click-fullscreen.patch'
         '0003-floating-edge-snap-preview-and-snap-on-drop-in-the-d.patch'
@@ -28,7 +32,7 @@ source=("i3::git+https://github.com/i3/i3#commit=${_i3_commit}"
         '0007-config-psycho_-directives.patch'
         'psychod.py' 'psycho.conf' 'psycho.config'
         'picom.conf' 'i3status.conf' 'psychod.1'
-        'i3psycho.desktop' 'i3psycho-session' 'USERGUIDE.md')
+        'i3psycho.desktop' 'i3psycho-session' 'userguide.txt')
 sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 
 prepare() {
@@ -54,6 +58,6 @@ package() {
   install -Dm644 picom.conf "$pkgdir/usr/share/i3psycho/picom.conf"
   install -Dm644 i3status.conf "$pkgdir/usr/share/i3psycho/i3status.conf"
   install -Dm644 psychod.1 "$pkgdir/usr/share/man/man1/psychod.1"
-  install -Dm644 USERGUIDE.md "$pkgdir/usr/share/doc/i3psycho/USERGUIDE.md"
+  install -Dm644 userguide.txt "$pkgdir/usr/share/doc/i3psycho/userguide.txt"
   install -Dm644 i3/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

@@ -4,6 +4,6 @@ set -e
 cd "$(dirname "$0")"
 cp ../psychod/psychod.py .
 cp ../dist/psycho.conf ../dist/psycho.config ../dist/picom.conf ../dist/i3status.conf .
-cp ../docs/psychod.1 ../docs/USERGUIDE.md .
+cp ../man/psychod.1 ../userguide.txt .
 cp ../patches/00*.patch .
 echo "staged; now: makepkg -si"

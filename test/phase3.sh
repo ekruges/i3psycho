@@ -5,8 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ln -sf "$PWD/psychod/psychod.py" /usr/local/bin/psychod
-ln -sf "$PWD/psychod/psychod-status" /usr/local/bin/psychod-status
-chmod +x psychod/psychod.py psychod/psychod-status
+chmod +x psychod/psychod.py
 
 pkill -f "bin/psychod" 2>/dev/null || true
 export DISPLAY=:99

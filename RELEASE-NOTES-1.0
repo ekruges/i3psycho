@@ -19,8 +19,10 @@ psychod:
    desktop, hot corners
  - survives i3 restarts, one instance per display, action failures are
    logged instead of fatal
- - psychod-status wraps any statusline and adds clickable chips for
-   minimized windows
+
+Bar chips for minimized windows are drawn by i3bar itself (patch 0005), so
+any status_command keeps working unchanged. There is no psychod-status
+wrapper; earlier notes named one that was never shipped.
 
 Distribution:
  - PKGBUILD (provides/conflicts i3-wm), xsession entry, session launcher

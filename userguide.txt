@@ -2,7 +2,7 @@ i3psycho User Guide
 ===================
 
 i3psycho is i3 with floating-first behavior: macOS-grade window management on
-top of an unmodified i3 core. It is a small patch series (4 patches) on
+top of an unmodified i3 core. It is a small patch series (7 patches) on
 upstream i3 plus a companion IPC daemon, `psychod`. Everything you know about
 i3 still applies: the config language, the IPC protocol, workspaces, marks,
 the scratchpad, i3bar, i3status, and your muscle memory.
@@ -17,23 +17,22 @@ troubleshooting.
 Arch Linux:
 
 ```
-git clone https://github.com/ekruges/i3psycho-wip
-cd i3psycho-wip/packaging && ./mkpkgfiles.sh
+git clone https://github.com/ekruges/i3psycho
+cd i3psycho/packaging && ./mkpkgfiles.sh
 makepkg -si
 ```
 
 The package provides and conflicts with `i3-wm` (the i3-gaps model): the
 patched binary is a drop-in `i3`. Your display manager gets an "i3psycho"
-session entry. `psychod` and `psychod-status` land in `/usr/bin`.
+session entry. `psychod` lands in `/usr/bin`.
 
 Any distro, manual:
 
 ```
-git clone https://github.com/ekruges/i3psycho-wip && cd i3psycho-wip
+git clone https://github.com/ekruges/i3psycho && cd i3psycho
 ./packaging/build-i3psycho.sh          # clones upstream i3, applies patches/, builds
 sudo ninja -C i3-build/build install   # installs the patched i3
 sudo install -m755 psychod/psychod.py /usr/local/bin/psychod
-sudo install -m755 psychod/psychod-status /usr/local/bin/psychod-status
 ```
 
 Runtime dependencies for psychod: `python3`, `python3-i3ipc`, `xdotool`
@@ -94,8 +93,15 @@ application puts them.
 psychod is a pure IPC client. It never touches X directly (except the
 optional hot-corner pointer poll via xdotool), so it can never crash the
 window manager. If it dies, i3 keeps running; `exec_always` restarts it on
-the next config reload, and a `flock` guard prevents duplicates. It
+the next i3 *restart*, and a `flock` guard prevents duplicates. It
 reconnects automatically when i3 restarts in place.
+
+Note the difference between restart and reload, because it is easy to lose
+an hour to: i3 drains its `exec_always` list only when it starts or restarts
+(`$mod+Shift+r`). `reload` re-reads the config and does not run autostarts at
+all, so after editing psycho.conf a reload applies your new bindings while
+leaving the old psychod process running with the old flags -- or leaving no
+psychod running at all, if it was not up before. Restart, don't reload.
 
 Actions:
 
@@ -123,16 +129,20 @@ Flags:
 
 The bar dock:
 
-```
-bar {
-    status_command psychod-status
-}
-```
+Patch 0005 puts the chips in i3bar itself, so there is nothing to configure
+and no wrapper to install -- keep your existing `status_command`. i3bar reads
+the minimized set over IPC and draws one clickable chip per window, left of
+the statusline. Set `psycho_chips no` to turn them off.
 
-`psychod-status` wraps your status command (default `i3status`, override
-with `--status-cmd`) and prepends one clickable chip per minimized window.
-It accepts both i3bar-JSON and plain-text status sources, so it also works
-with conky and friends.
+Earlier drafts of this guide told you to set `status_command psychod-status`.
+No such program was ever shipped in this repo -- following that made i3bar
+exec a missing binary and left you with no statusline at all. Patch 0005
+replaced that design; the wrapper is gone.
+
+Other bars (polybar, waybar) do not read i3's chip protocol, so they need a
+module of their own: subscribe to `window` and `tick` events, list the leaves
+of `__i3_scratch`, and emit `i3-msg -t send_tick psycho:restore:<con_id>` as
+each chip's click action.
 
 5. Behavior differences from stock i3
 -------------------------------------
@@ -182,6 +192,12 @@ extended by events that did not fire before.
   `DISPLAY=:0 psychod` in a terminal to watch it live.
 - Windows spawn centered, not cascaded: the daemon is not connected;
   see above.
+- Windows land in *random* spots, some cascaded and some not: you have a
+  `for_window ... move position center` (or `move absolute position`) rule
+  of your own. Those run in the same assignment batch as `floating enable`,
+  after the cascade has already placed the window, so whichever fires last
+  wins. Drop the centering rule for normal windows and let the cascade own
+  position; keep it for dialogs, which psychod deliberately skips.
 - A window snapped with a small gap at the bottom: its size hints
   (terminal character cells) round the size down. Keyboard/daemon snapping
   honors hints like every WM; the fork's drag-snap is exact.
@@ -192,9 +208,9 @@ extended by events that did not fire before.
 8. FAQ
 ------
 
-Is this a fork? A 4-patch series on upstream i3 master, rebased per
-release, plus a daemon that any stock i3 can also run (with graceful
-degradation). The i3-gaps model.
+Is this a fork? A 7-patch series on a pinned upstream i3 release (4.25.1),
+rebased per release, plus a daemon that any stock i3 can also run (with
+graceful degradation). The i3-gaps model.
 
 Wayland? No. This is X11, like i3. A Wayland i3psycho would be a sway
 patch series, which is a different project.

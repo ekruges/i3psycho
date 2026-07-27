@@ -43,7 +43,7 @@ desktop_stash = collections.defaultdict(list)  # ws name -> [con_ids]
 expose_stash = {}                           # ws name -> {con_id: rect}
 cycle_state = {"order": [], "idx": 0, "t": 0.0}
 cascade_n = collections.defaultdict(int)    # ws name -> spawn counter
-cascaded = set()
+cascaded = {}                               # con_id -> cascade slot
 suppress = {}                               # con_id -> ignore moves until (monotonic)
 moving_hint = {}                            # con_id -> last move event (from IPC)
 
@@ -240,24 +240,31 @@ def _dispatch(payload):
         do_expose()
 
 
-def cascade(con):
-    if con.id in cascaded:
+def cascade(con, force=False):
+    if con.id in cascaded and not force:
         return
     tree = conn.get_tree()
     c = tree.find_by_id(con.id)
     if c is None or floating_parent(c) is None:
         return
-    wtype = getattr(c, "window_type", None)
+    # i3ipc's Con class never maps window_type, so getattr() always returned
+    # None here and this skip was dead code: dialogs and splashes got yanked
+    # into the cascade instead of being left where the app put them. The
+    # field is only in the raw IPC dict.
+    wtype = c.ipc_data.get("window_type")
     if wtype in ("dialog", "utility", "splash", "notification", "dock"):
         return
     ws = c.workspace()
     if ws is None or ws.name.startswith("__"):
         return
-    if len(cascaded) > 512:
-        cascaded.clear()
-    cascaded.add(con.id)
-    n = cascade_n[ws.name] % 8
-    cascade_n[ws.name] += 1
+    if con.id in cascaded:
+        n = cascaded[con.id]        # re-placing the same window: same slot,
+    else:                           # or the visible step doubles
+        if len(cascaded) > 512:
+            cascaded.clear()
+        n = cascade_n[ws.name] % 8
+        cascade_n[ws.name] += 1
+    cascaded[con.id] = n
     step = ARGS.cascade_step
     fc = floating_parent(c)
     x = ws.rect.x + 40 + n * step
@@ -269,7 +276,12 @@ def cascade(con):
 
 
 def on_new(_, e):
-    cascade(e.container)
+    # `floating enable` from a for_window rule fires window::floating mid-way
+    # through the assignment batch, so on_floating cascades before the rest of
+    # the batch runs -- and a later `move position center` rule then overwrites
+    # it. window::new is emitted after the whole batch, so it is the
+    # authoritative placement point, so force past the spent guard.
+    cascade(e.container, force=True)
 
 
 def on_floating(_, e):
@@ -422,10 +434,25 @@ def poll_hot_corner(wconn, st, root_rect, now):
 
 def evaluate_drop(wconn, fc, leaf, wa):
     m = ARGS.edge_margin
-    left = fc.rect.x < wa.x - m
-    right = fc.rect.x + fc.rect.width > wa.x + wa.width + m
-    top = fc.rect.y < wa.y - m
-    bottom = fc.rect.y + fc.rect.height > wa.y + wa.height + m
+    over_l = (wa.x - m) - fc.rect.x
+    over_r = (fc.rect.x + fc.rect.width) - (wa.x + wa.width + m)
+    over_t = (wa.y - m) - fc.rect.y
+    over_b = (fc.rect.y + fc.rect.height) - (wa.y + wa.height + m)
+    horiz = max(over_l, over_r, 0)
+    vert = max(over_t, over_b, 0)
+    # A window as tall as the workarea overhangs the cross axis by a few px on
+    # any sideways drag, which read as a corner and snapped it to a quarter.
+    # Only call it a corner when both axes overflow comparably; otherwise the
+    # dominant axis wins and a half stays a half.
+    if horiz and vert:
+        if vert * 2 < horiz:
+            vert = 0
+        elif horiz * 2 < vert:
+            horiz = 0
+    left = bool(horiz) and over_l >= over_r
+    right = bool(horiz) and over_r > over_l
+    top = bool(vert) and over_t >= over_b
+    bottom = bool(vert) and over_b > over_t
     region = None
     if top and left:
         region = "tl"

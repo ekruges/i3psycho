@@ -32,8 +32,9 @@ source=("i3::git+https://github.com/i3/i3#tag=${_i3_tag}"
         '0007-config-psycho_-directives.patch'
         'psychod.py' 'psycho.conf' 'psycho.config'
         'picom.conf' 'i3status.conf' 'psychod.1'
-        'i3psycho.desktop' 'i3psycho-session' 'userguide.txt')
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+        'i3psycho.desktop' 'i3psycho-session' 'userguide.txt'
+        'i3psycho-doctor' 'psycho-chips-polybar.py')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 
 prepare() {
   cd i3
@@ -59,5 +60,8 @@ package() {
   install -Dm644 i3status.conf "$pkgdir/usr/share/i3psycho/i3status.conf"
   install -Dm644 psychod.1 "$pkgdir/usr/share/man/man1/psychod.1"
   install -Dm644 userguide.txt "$pkgdir/usr/share/doc/i3psycho/userguide.txt"
+  install -Dm755 i3psycho-doctor "$pkgdir/usr/bin/i3psycho-doctor"
+  install -Dm755 psycho-chips-polybar.py \
+    "$pkgdir/usr/share/i3psycho/contrib/psycho-chips-polybar.py"
   install -Dm644 i3/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

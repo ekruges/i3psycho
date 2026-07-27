@@ -41,15 +41,54 @@ Runtime dependencies for psychod: `python3`, `python3-i3ipc`, `xdotool`
 2. Choose your entry path
 -------------------------
 
-Existing i3 user (recommended): add one line to your i3 config:
+Existing i3 user (recommended): add one line to the BOTTOM of your i3 config:
 
 ```
 include /usr/share/i3psycho/psycho.conf
 ```
 
+Then restart i3 ($mod+Shift+r) and run:
+
+```
+i3psycho-doctor
+```
+
 That adds float-by-default, the psychod bindings, and the daemon launch.
 Your colors, bar, and existing binds are untouched. Delete the line to go
 back to stock behavior.
+
+Three things about that sequence are load-bearing, and each one has its own
+failure that looks like "i3psycho is broken":
+
+- **Bottom, not top.** i3 keeps the LAST binding for a key. An include at the
+  top of your config gets silently overridden by every bind below it, and
+  none of the psycho keys do anything.
+- **Restart, not reload.** i3 runs `exec_always` on start and restart only;
+  `reload` re-reads the config and never touches autostarts. Reload after
+  adding the include and psychod does not start, so every binding is a no-op.
+- **Run the doctor.** `i3psycho-doctor` inspects the live session and reports
+  what is actually wrong, with the line to add for each: whether you are on
+  the patched binary or still running the old one, whether psychod is up,
+  which of your binds i3psycho took (or which of its binds you overrode),
+  `for_window` rules that fight the cascade for window position, windows with
+  no titlebar to draw buttons in, and whether your bar can show the chips.
+
+Things it will tell you about, worth knowing in advance:
+
+- i3psycho claims `$mod+Left/Right/Up/Down` for snapping. i3's own default
+  config binds those to focus. Keep focus on `$mod+h/j/k/l`, or move snapping
+  to `$mod+Ctrl+arrows`.
+- If a window opens with no titlebar it has no buttons, because the buttons
+  are drawn in the titlebar. Applications suppress decoration through
+  `_MOTIF_WM_HINTS` and i3 honors it — terminals do this most often (in
+  xfce4-terminal it is "Display borders around new windows"). psycho.conf
+  ships `for_window [class=".*"] border normal 2` to override it.
+- If you have `for_window ... move position center` rules, drop them for
+  normal windows. They run in the same batch as the cascade and the last
+  write wins, so windows land in random spots. Keep them for dialogs, which
+  psychod deliberately skips.
+- Chips for minimized windows are drawn by i3bar. On polybar, install
+  `contrib/psycho-chips-polybar.py` (instructions are in its docstring).
 
 Fresh install: use the standalone config:
 

@@ -1,0 +1,356 @@
+#!/usr/bin/env python3
+"""i3psycho-doctor: check a live i3 session for the things that stop i3psycho
+working on a config that already existed.
+
+Every finding names the file to edit and the line to write. Run it after
+adding the include and restarting i3:
+
+    i3psycho-doctor
+
+Exit status is 0 if nothing is broken (warnings allowed), 1 otherwise.
+"""
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+try:
+    import i3ipc
+except ImportError:
+    sys.exit("i3psycho-doctor: python-i3ipc is not installed (pacman -S python-i3ipc)")
+
+BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
+GREEN, YELLOW, RED = "\033[32m", "\033[33m", "\033[31m"
+if not sys.stdout.isatty():
+    BOLD = DIM = RESET = GREEN = YELLOW = RED = ""
+
+FAILED = False
+
+
+def ok(msg):
+    print(f"  {GREEN}ok{RESET}    {msg}")
+
+
+def warn(msg, fix=None):
+    print(f"  {YELLOW}warn{RESET}  {msg}")
+    if fix:
+        print(f"        {DIM}fix: {fix}{RESET}")
+
+
+def bad(msg, fix=None):
+    global FAILED
+    FAILED = True
+    print(f"  {RED}FAIL{RESET}  {msg}")
+    if fix:
+        print(f"        {DIM}fix: {fix}{RESET}")
+
+
+def section(title):
+    print(f"\n{BOLD}{title}{RESET}")
+
+
+# --------------------------------------------------------------------------
+
+
+def read_config(conn):
+    """The running config, with every include spliced in."""
+    try:
+        reply = conn.get_config()
+    except Exception:
+        return ""
+    # i3 >= 4.21 returns every file it read under `included_configs` (the main
+    # config is the first entry). i3ipc's ConfigReply class only maps `config`,
+    # which holds the top-level file alone -- so reading the object misses
+    # psycho.conf entirely, and psycho.conf is the whole point. The list is
+    # only in the raw dict.
+    data = getattr(reply, "ipc_data", None) or {}
+    included = data.get("included_configs") or []
+    if included:
+        return "\n".join(inc.get("variable_replaced_contents")
+                         or inc.get("raw_contents") or "" for inc in included)
+    return getattr(reply, "config", "") or ""
+
+
+def running_i3_binary():
+    """Path of the i3 that is actually managing this session -- not whatever
+    `which i3` resolves to. They differ for exactly as long as it takes to
+    install a new build and forget to restart, which is when this matters."""
+    try:
+        pids = subprocess.run(["pgrep", "-x", "i3"], capture_output=True,
+                              text=True).stdout.split()
+    except Exception:
+        return None
+    for pid in pids:
+        try:
+            return os.path.realpath(f"/proc/{pid}/exe")
+        except OSError:
+            continue
+    return None
+
+
+def strip_comments(text):
+    return "\n".join(re.sub(r"(?<!\\)#.*$", "", ln) for ln in text.splitlines())
+
+
+def is_patched(i3_path):
+    """A patched i3 accepts psycho_* directives; stock i3 rejects them.
+    Version strings cannot answer this -- any git build of stock i3 also
+    carries a -g<sha> suffix."""
+    with tempfile.NamedTemporaryFile("w", suffix=".config", delete=False) as fh:
+        fh.write("psycho_titlebar_buttons yes\n")
+        probe = fh.name
+    try:
+        return subprocess.run([i3_path, "-C", "-c", probe],
+                              capture_output=True, timeout=15).returncode == 0
+    except Exception:
+        return None
+    finally:
+        os.unlink(probe)
+
+
+def check_binary():
+    section("i3 binary")
+    live = running_i3_binary()
+    onpath = shutil.which("i3")
+
+    if live is None:
+        warn("could not identify the running i3 process; falling back to PATH")
+        live = onpath
+
+    live_patched = is_patched(live) if live else None
+    if live_patched is None:
+        warn(f"could not probe {live}")
+        return False
+
+    if live_patched:
+        ok(f"the running i3 is the patched build ({live})")
+    else:
+        # The single most confusing state there is: installed but not restarted.
+        # `i3 --version` in a shell answers for the new binary while the old one
+        # is still managing your windows.
+        if onpath and onpath != live and is_patched(onpath):
+            bad(f"a patched i3 is installed at {onpath}, but this session is "
+                f"still running the stock {live}",
+                "i3 re-execs argv[0] through PATH, so `$mod+Shift+r` (restart) "
+                "is enough -- no logout needed. Until you do, there are no "
+                "titlebar buttons.")
+        else:
+            warn(f"{live} is stock i3 -- psychod features all work, but the "
+                 f"titlebar buttons, drag snap preview and i3bar chips live in "
+                 f"the patch series",
+                 "build and install it: ./packaging/build-i3psycho.sh && "
+                 "sudo ninja -C i3-build/build install")
+    return bool(live_patched)
+
+
+def check_daemon(config):
+    section("psychod")
+    running = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                argv = fh.read().split(b"\0")
+        except OSError:
+            continue
+        joined = b" ".join(argv).decode("utf-8", "replace")
+        # match the interpreter form too: "python3 /usr/bin/psychod ..."
+        if re.search(r"(^|/)psychod(\s|$)", joined) and "flock" not in joined:
+            running.append((pid, joined.strip()))
+
+    configured = "psychod" in config
+    if running:
+        for pid, cmd in running:
+            ok(f"running as pid {pid}")
+            print(f"        {DIM}{cmd}{RESET}")
+        if len(running) > 1:
+            warn("more than one psychod is running; they will fight over placement",
+                 "the shipped launcher wraps psychod in `flock -n` to prevent "
+                 "this -- check you did not also start one by hand")
+    elif configured:
+        bad("psychod is NOT running, but your config launches it",
+            "i3 drains exec_always only on start and RESTART. `reload` never "
+            "runs autostarts. Press $mod+Shift+r (restart), not $mod+Shift+c.")
+    else:
+        bad("psychod is not running and nothing in your config starts it",
+            "add: include /usr/share/i3psycho/psycho.conf")
+    return bool(running)
+
+
+def check_binds(config):
+    section("keybindings")
+    text = strip_comments(config)
+    binds = {}
+    spelling = {}
+    dupes = {}
+    for line in text.splitlines():
+        m = re.match(r"\s*bindsym\s+(?:--[\w-]+\s+)*([^\s]+)\s+(.*)", line)
+        if not m:
+            continue
+        keys, action = m.group(1), m.group(2).strip()
+        # i3 cares about modifier spelling but not their order; normalise so
+        # $mod+Shift+d and $mod+shift+d compare equal. Keep the first spelling
+        # seen for display -- echoing "$mod+E" at someone who wrote "$mod+e"
+        # sends them looking for a binding they do not have.
+        norm = "+".join(sorted(k.lower() for k in keys.split("+")))
+        spelling.setdefault(norm, keys)
+        if norm in binds and binds[norm] != action:
+            dupes.setdefault(norm, [binds[norm]]).append(action)
+        binds[norm] = action
+
+    declared = sum(1 for line in text.splitlines() if "nop psycho:" in line)
+    live = [k for k, v in binds.items() if "nop psycho:" in v]
+    if live:
+        ok(f"{len(live)} psycho bindings live")
+    elif declared:
+        bad(f"psycho.conf declares {declared} bindings but every one of them is "
+            f"overridden later in your config",
+            "i3 takes the LAST binding for a key, so anything you bind after "
+            "the include wins. Move the include below your own bindings.")
+    else:
+        bad("no psycho: bindings are in the running config",
+            "the include is missing, or i3 has not restarted since you added "
+            "it ($mod+Shift+r -- reload does not re-read includes you just added)")
+
+    for norm, actions in dupes.items():
+        pretty = spelling.get(norm, norm)
+        involved_psycho = any("nop psycho:" in a for a in actions)
+        if not involved_psycho:
+            continue
+        winner = actions[-1]
+        losers = actions[:-1]
+        if "nop psycho:" in winner:
+            warn(f"{pretty}: i3psycho took a bind you already used "
+                 f"({', '.join(losers)})",
+                 f"the include sits after your binding, so psycho wins. Move "
+                 f"the psycho bind: rebind it in your own config AFTER the "
+                 f"include line.")
+        else:
+            warn(f"{pretty}: your config overrides the psycho action "
+                 f"({', '.join(losers)}) -- that psycho feature has no key",
+                 "bind it to something free, e.g. "
+                 "`bindsym $mod+grave nop psycho:cycle`")
+
+
+def check_placement_rules(config):
+    section("placement rules")
+    text = strip_comments(config)
+    offenders = []
+    for line in text.splitlines():
+        if not line.lstrip().startswith("for_window"):
+            continue
+        if re.search(r"\bmove\s+(absolute\s+)?position\b", line):
+            offenders.append(line.strip())
+    if not offenders:
+        ok("nothing competes with the cascade for window position")
+        return
+    for line in offenders:
+        if re.search(r'window_type\s*=\s*"?(dialog|splash|utility)', line):
+            ok(f"dialog rule is fine, psychod skips those: {DIM}{line}{RESET}")
+            continue
+        warn(f"this rule fights the cascade: {line}",
+             "for_window rules run as one batch and the last write wins, so "
+             "windows land in unpredictable spots. Drop the `move position` "
+             "for normal windows and let the cascade own position, or set "
+             "`psycho_cascade no` if you prefer your own placement.")
+
+
+def check_decorations(conn):
+    section("titlebars (where the buttons live)")
+    tree = conn.get_tree()
+    bare = {}
+    total = 0
+    for con in tree.leaves():
+        floating = con.floating in ("auto_on", "user_on") or (
+            con.parent is not None and con.parent.type == "floating_con")
+        if not floating:
+            continue
+        total += 1
+        if con.deco_rect is None or con.deco_rect.height == 0:
+            key = con.window_class or con.name or "?"
+            bare[key] = bare.get(key, 0) + 1
+    if total == 0:
+        warn("no floating windows open, cannot check decorations",
+             "open a terminal and run this again")
+        return
+    if not bare:
+        ok(f"all {total} floating window(s) have a titlebar")
+        return
+    for cls, n in bare.items():
+        bad(f"{cls}: {n} floating window(s) have NO titlebar, so they show no "
+            f"close/iconify/maximize buttons",
+            "the app asked for no decoration via _MOTIF_WM_HINTS (common for "
+            "terminals: xfce4-terminal's \"Display borders around new windows\" "
+            "does this) and i3 honors that. Override it with an explicit rule "
+            "AFTER the include:  for_window [class=\".*\"] border normal 2")
+
+
+def check_border_defaults(config):
+    text = strip_comments(config)
+    for line in text.splitlines():
+        m = re.match(r"\s*(default_floating_border|default_border)\s+(.*)", line)
+        if m and re.match(r"(none|pixel)\b", m.group(2).strip()):
+            warn(f"`{line.strip()}` leaves no titlebar to draw buttons in",
+                 "use `normal 2` for the floating default")
+
+
+def check_bar(config, patched):
+    section("bar chips for minimized windows")
+    text = strip_comments(config)
+    has_i3bar = re.search(r"^\s*bar\s*\{", text, re.M) is not None
+    others = []
+    for name in ("polybar", "waybar", "tint2", "xfce4-panel"):
+        if shutil.which(name) and subprocess.run(
+                ["pgrep", "-x", name], capture_output=True).returncode == 0:
+            others.append(name)
+
+    if others:
+        warn(f"you run {', '.join(others)}, not i3bar -- the chips in patch "
+             f"0005 are drawn by i3bar and will never appear there",
+             "use the module in contrib/psycho-chips-polybar.py; it renders the "
+             "same chips from the i3 tree and restores on click")
+    elif has_i3bar and patched:
+        ok("i3bar is configured and the binary is patched: chips will show")
+    elif has_i3bar and not patched:
+        warn("i3bar is configured but the binary is stock, so there are no chips",
+             "install the patched i3, or use contrib/psycho-chips-polybar.py")
+    else:
+        warn("no bar found; minimized windows will be reachable only by "
+             "$mod+Shift+m or the scratchpad")
+
+
+def main():
+    print(f"{BOLD}i3psycho-doctor{RESET}")
+    try:
+        conn = i3ipc.Connection()
+    except Exception as exc:
+        sys.exit(f"cannot reach i3 over IPC: {exc}")
+
+    config = read_config(conn)
+    if not config:
+        warn("i3 returned an empty config over IPC; some checks will be blind")
+
+    patched = check_binary()
+    check_daemon(config)
+    check_binds(config)
+    check_placement_rules(config)
+    check_decorations(conn)
+    check_border_defaults(config)
+    check_bar(config, patched)
+
+    print()
+    if FAILED:
+        print(f"{RED}Something above is broken.{RESET} Fix the FAIL lines, then "
+              f"press $mod+Shift+r (restart -- reload is not enough).")
+        return 1
+    print(f"{GREEN}No blockers.{RESET} Warnings above are things you may not "
+          f"have meant to accept.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

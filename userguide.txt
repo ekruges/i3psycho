@@ -1,0 +1,207 @@
+i3psycho User Guide
+===================
+
+i3psycho is i3 with floating-first behavior: macOS-grade window management on
+top of an unmodified i3 core. It is a small patch series (4 patches) on
+upstream i3 plus a companion IPC daemon, `psychod`. Everything you know about
+i3 still applies: the config language, the IPC protocol, workspaces, marks,
+the scratchpad, i3bar, i3status, and your muscle memory.
+
+This guide covers installation, daily use, every new binding and action,
+configuration, the exact list of behavior differences from stock i3, and
+troubleshooting.
+
+1. Installation
+---------------
+
+Arch Linux:
+
+```
+git clone https://github.com/ekruges/i3psycho-wip
+cd i3psycho-wip/packaging && ./mkpkgfiles.sh
+makepkg -si
+```
+
+The package provides and conflicts with `i3-wm` (the i3-gaps model): the
+patched binary is a drop-in `i3`. Your display manager gets an "i3psycho"
+session entry. `psychod` and `psychod-status` land in `/usr/bin`.
+
+Any distro, manual:
+
+```
+git clone https://github.com/ekruges/i3psycho-wip && cd i3psycho-wip
+./packaging/build-i3psycho.sh          # clones upstream i3, applies patches/, builds
+sudo ninja -C i3-build/build install   # installs the patched i3
+sudo install -m755 psychod/psychod.py /usr/local/bin/psychod
+sudo install -m755 psychod/psychod-status /usr/local/bin/psychod-status
+```
+
+Runtime dependencies for psychod: `python3`, `python3-i3ipc`, `xdotool`
+(hot corners only).
+
+2. Choose your entry path
+-------------------------
+
+Existing i3 user (recommended): add one line to your i3 config:
+
+```
+include /usr/share/i3psycho/psycho.conf
+```
+
+That adds float-by-default, the psychod bindings, and the daemon launch.
+Your colors, bar, and existing binds are untouched. Delete the line to go
+back to stock behavior.
+
+Fresh install: use the standalone config:
+
+```
+cp /usr/share/i3psycho/psycho.config ~/.config/i3/config
+```
+
+It is a complete, commented i3 config: the psycho layer plus the standard
+i3 survival kit (terminal, dmenu, workspaces, reload/restart/exit).
+
+3. Daily use
+------------
+
+| Input | Effect |
+|---|---|
+| Drag titlebar | Move window (stock i3 behavior) |
+| Drag to screen edge | Live snap preview (solid blue); drop to snap. Left/right = halves, top = maximize, corners = quarters |
+| `×` titlebar button | Close window |
+| `−` titlebar button | Iconify (minimize) to the scratchpad, geometry remembered |
+| `+` titlebar button | Fullscreen toggle |
+| Double-click titlebar | Fullscreen toggle |
+| App's own minimize button | Same as `−` (WM_CHANGE_STATE Iconic is honored) |
+| Click chip in bar | Restore that minimized window in place |
+| Hot corner top-left | Expose |
+| Hot corner bottom-right | Show desktop |
+| `$mod+Left / Right / Up / Down` | Snap left half / right half / maximize / center |
+| `$mod+Ctrl+1..4` | Snap to quarter (TL, TR, BL, BR) |
+| `$mod+m` / `$mod+Shift+m` | Minimize / restore most recent |
+| `$mod+Tab` | Cycle windows, most-recent-first; pause 1.2s to commit |
+| `$mod+e` | Expose: all floats in a grid; toggle, click, or cycle to exit |
+| `$mod+Shift+d` | Show desktop toggle |
+| `$mod+t` | Toggle this window back to tiling. Everything i3 does with tiles still works |
+
+New windows cascade from the top-left like macOS instead of stacking dead
+center. Dialogs, splash screens, and notifications are left where the
+application puts them.
+
+4. psychod reference
+--------------------
+
+psychod is a pure IPC client. It never touches X directly (except the
+optional hot-corner pointer poll via xdotool), so it can never crash the
+window manager. If it dies, i3 keeps running; `exec_always` restarts it on
+the next config reload, and a `flock` guard prevents duplicates. It
+reconnects automatically when i3 restarts in place.
+
+Actions:
+
+Trigger from a keybinding (`bindsym ... nop psycho:<action>`) or from
+scripts (`i3-msg -t send_tick psycho:<action>`):
+
+| Action | Meaning |
+|---|---|
+| `psycho:snap:left\|right\|max\|center\|tl\|tr\|bl\|br` | Snap focused window to exact workarea region |
+| `psycho:min` | Minimize focused window, remember geometry |
+| `psycho:restore` | Restore most recently minimized |
+| `psycho:restore:<con_id>` | Restore a specific window (used by the bar chips) |
+| `psycho:cycle` | Walk the MRU window stack |
+| `psycho:expose` | Toggle the expose grid on the focused workspace |
+| `psycho:showdesktop` | Toggle all floats on the workspace to/from the scratchpad |
+
+Flags:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--cascade-step N` | 30 | px offset between cascaded spawns |
+| `--edge-margin N` | 25 | px beyond the workarea edge that triggers poll-based drop-snap |
+| `--drop-debounce S` | 0.25 | seconds a moved window must rest before snapping |
+| `--hot-corners SPEC` | `tl=expose,br=showdesktop` | `corner=action` pairs, or `none` |
+
+The bar dock:
+
+```
+bar {
+    status_command psychod-status
+}
+```
+
+`psychod-status` wraps your status command (default `i3status`, override
+with `--status-cmd`) and prepends one clickable chip per minimized window.
+It accepts both i3bar-JSON and plain-text status sources, so it also works
+with conky and friends.
+
+5. Behavior differences from stock i3
+-------------------------------------
+
+Complete list. Everything not listed behaves exactly like i3.
+
+1. Floating windows get titlebar buttons (close / iconify / maximize)
+   drawn in your titlebar text color. Tiled windows are untouched.
+2. Double-clicking a floating titlebar toggles fullscreen (stock i3:
+   starts a drag with no click action).
+3. Dragging a floating window to a workarea edge shows a snap preview
+   and snaps on drop (stock i3: plain move).
+4. `WM_CHANGE_STATE` Iconic requests are honored and move the window to
+   the scratchpad. Stock i3 rejects them (in-app minimize buttons do
+   nothing there). Unmanaged windows still get the stock reject.
+5. Scratchpad windows carry `_NET_WM_STATE_HIDDEN` and ICCCM
+   `WM_STATE` Iconic while hidden (stock i3: WITHDRAWN and no hidden
+   state). Pagers and taskbars can tell minimized windows apart.
+6. Floating repositions emit `window::move` IPC events (stock i3 emits
+   none; this one is a candidate upstream patch).
+7. With the shipped config: new windows float by default via
+   `for_window [tiling] floating enable` — plain config, remove the line
+   for stock behavior.
+
+Vanilla i3 configs run unmodified. The IPC protocol is unchanged and only
+extended by events that did not fire before.
+
+6. Performance notes
+--------------------
+
+- Build with `--buildtype=release` (the build script and PKGBUILD do).
+  Meson's default is a debug build and it is visibly slower.
+- `dist/picom.conf` is an intentionally invisible compositor config:
+  vsync only, every eye-candy feature off. Use it if you see tearing
+  during drags; skip it entirely on a well-behaved driver.
+- Measured end-to-end action latency (tick to geometry applied) in a
+  2-core build container: 1.9 ms mean, 3.0 ms max.
+
+7. Troubleshooting
+------------------
+
+- Something ignores my keybind: psychod not running? Check
+  `pgrep -af psychod`, and `i3-msg -t send_tick psycho:snap:left` to test
+  the pipeline without keybindings.
+- psychod logs: it writes to stderr, which lands in i3's log. Run
+  `i3 --moreversion` to confirm you are on the patched binary, and use
+  `DISPLAY=:0 psychod` in a terminal to watch it live.
+- Windows spawn centered, not cascaded: the daemon is not connected;
+  see above.
+- A window snapped with a small gap at the bottom: its size hints
+  (terminal character cells) round the size down. Keyboard/daemon snapping
+  honors hints like every WM; the fork's drag-snap is exact.
+- Bug reports: include `i3 --moreversion`, your config, and
+  `/tmp/psychod-*.lock` ownership. The i3 debug log workflow
+  (`i3-dump-log`) works unchanged.
+
+8. FAQ
+------
+
+Is this a fork? A 4-patch series on upstream i3 master, rebased per
+release, plus a daemon that any stock i3 can also run (with graceful
+degradation). The i3-gaps model.
+
+Wayland? No. This is X11, like i3. A Wayland i3psycho would be a sway
+patch series, which is a different project.
+
+Can I keep tiling? Yes. `$mod+t` returns any window to the tree, and
+every tiling feature is intact. i3psycho is a superset.
+
+Why is the UI so plain? On purpose. The blue titlebar is sacred, and
+there are no shadows, no rounded corners, no animations: that is the i3
+aesthetic, and it is frozen by decree of the project.

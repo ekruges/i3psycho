@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=i3psycho
+Comment=i3 for psychopaths: floating-first i3 with macOS-grade window behavior
+Exec=i3psycho-session
+TryExec=i3
+Type=Application
+X-LightDM-DesktopName=i3psycho
+DesktopNames=i3psycho
+Keywords=window manager;floating;i3;

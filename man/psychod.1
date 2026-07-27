@@ -1,0 +1,50 @@
+.TH PSYCHOD 1 "July 2026" "i3psycho 1.0" "User Commands"
+.SH NAME
+psychod \- companion daemon for i3psycho, the floating-first i3
+.SH SYNOPSIS
+.B psychod
+[\fB\-\-cascade\-step\fR \fIN\fR]
+[\fB\-\-edge\-margin\fR \fIN\fR]
+[\fB\-\-drop\-debounce\fR \fIS\fR]
+[\fB\-\-hot\-corners\fR \fISPEC\fR]
+.SH DESCRIPTION
+.B psychod
+implements the macOS-style window behaviors of i3psycho over the i3 IPC
+protocol: cascade placement of new windows, exact-workarea snapping,
+minimize with geometry restore, an expose grid, MRU window cycling, show
+desktop, and hot corners. It is a pure IPC client: if it dies, the window
+manager is unaffected. It is normally started from the i3 config:
+.PP
+.nf
+    exec_always --no-startup-id flock -n /tmp/psychod-${DISPLAY#:}.lock psychod
+.fi
+.PP
+Actions are triggered by
+.B nop psycho:<action>
+keybindings or
+.B i3\-msg \-t send_tick psycho:<action>
+from scripts. Actions: snap:left|right|max|center|tl|tr|bl|br, min,
+restore[:con_id], cycle, expose, showdesktop.
+.SH OPTIONS
+.TP
+.BR \-\-cascade\-step " " \fIN\fR
+Pixel offset between cascaded window spawns (default 30).
+.TP
+.BR \-\-edge\-margin " " \fIN\fR
+Pixels beyond the workarea edge that trigger poll-based drop snapping
+(default 25). The patched i3 also snaps natively during drags.
+.TP
+.BR \-\-drop\-debounce " " \fIS\fR
+Seconds a moved window must rest before snapping (default 0.25).
+.TP
+.BR \-\-hot\-corners " " \fISPEC\fR
+Comma-separated corner=action pairs from tl, tr, bl, br (default
+"tl=expose,br=showdesktop"), or "none" to disable. Requires xdotool.
+.SH SEE ALSO
+.BR i3 (1),
+.BR psychod-status (1),
+.BR i3\-msg (1)
+.PP
+Full guide: /usr/share/doc/i3psycho/userguide.txt
+.SH AUTHOR
+The i3psycho project (https://github.com/ekruges/i3psycho-wip).

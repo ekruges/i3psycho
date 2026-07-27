@@ -1,0 +1,657 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ezra Kruger <ekruges@users.noreply.github.com>
+Date: Mon, 27 Jul 2026 06:31:00 -0400
+Subject: [PATCH 5/7] ipc/i3bar: taskbar chips for minimized windows
+
+New GET_SCRATCHPAD IPC message (type 13): one entry per scratchpad
+window with con id, X window, name, class, and urgency. i3bar
+subscribes to window events, keeps the list current, and renders one
+chip per window right of the workspace buttons: _NET_WM_ICON when the
+app provides one, a class-letter tile otherwise, urgent chips blinking
+in the urgent workspace colors. Clicking a chip shows the window.
+---
+ i3bar/include/common.h      |   1 +
+ i3bar/include/scratchpad.h  |  61 ++++++++
+ i3bar/include/xcb_atoms.def |   1 +
+ i3bar/src/ipc.c             |  22 ++-
+ i3bar/src/main.c            |   2 +
+ i3bar/src/scratchpad.c      | 274 ++++++++++++++++++++++++++++++++++++
+ i3bar/src/xcb.c             |  73 ++++++++++
+ include/i3/ipc.h            |   4 +
+ meson.build                 |   1 +
+ src/ipc.c                   |  45 +++++-
+ 10 files changed, 481 insertions(+), 3 deletions(-)
+ create mode 100644 i3bar/include/scratchpad.h
+ create mode 100644 i3bar/src/scratchpad.c
+
+diff --git a/i3bar/include/common.h b/i3bar/include/common.h
+index 9c13d02f..c32496d9 100644
+--- a/i3bar/include/common.h
++++ b/i3bar/include/common.h
+@@ -90,6 +90,7 @@ extern TAILQ_HEAD(statusline_head, status_block) statusline_head;
+ #include "outputs.h"
+ #include "util.h"
+ #include "workspaces.h"
++#include "scratchpad.h"
+ #include "mode.h"
+ #include "trayclients.h"
+ #include "xcb.h"
+diff --git a/i3bar/include/scratchpad.h b/i3bar/include/scratchpad.h
+new file mode 100644
+index 00000000..0ebaf8fa
+--- /dev/null
++++ b/i3bar/include/scratchpad.h
+@@ -0,0 +1,61 @@
++/*
++ * vim:ts=4:sw=4:expandtab
++ *
++ * i3bar - an xcb-based status- and ws-bar for i3
++ * © 2010 Axel Wagner and contributors (see also: LICENSE)
++ *
++ * scratchpad.h: Chips for minimized (scratchpad) windows, rendered next to
++ * the workspace buttons like a classic taskbar.
++ *
++ */
++#pragma once
++
++#include <config.h>
++
++#include <cairo.h>
++#include <stdbool.h>
++#include <stdint.h>
++
++#include "common.h"
++
++typedef struct sp_item {
++    /* i3 container id, used for the restore command */
++    long id;
++    /* X11 window, used to fetch _NET_WM_ICON */
++    uint32_t window;
++    bool urgent;
++    /* first letter of the window class, the icon fallback */
++    i3String *letter;
++    /* native-size ARGB icon, may be NULL */
++    cairo_surface_t *icon;
++    int icon_w;
++    int icon_h;
++
++    TAILQ_ENTRY(sp_item) entries;
++} sp_item;
++
++TAILQ_HEAD(sp_head, sp_item);
++extern struct sp_head sp_items;
++
++/* Blink phase for urgent chips, toggled by a timer. */
++extern bool sp_pulse_on;
++
++/**
++ * Parse a GET_SCRATCHPAD reply, reusing already-fetched icons.
++ *
++ */
++void parse_scratchpad_json(const unsigned char *json, size_t size);
++
++int scratchpad_count(void);
++
++/**
++ * Restore the n-th chip's window (sends the command to i3).
++ *
++ */
++void scratchpad_restore(int index);
++
++/**
++ * Start the urgency pulse timer on main_loop.
++ *
++ */
++void scratchpad_init(void);
+diff --git a/i3bar/include/xcb_atoms.def b/i3bar/include/xcb_atoms.def
+index 453dd0ce..865b1474 100644
+--- a/i3bar/include/xcb_atoms.def
++++ b/i3bar/include/xcb_atoms.def
+@@ -1,3 +1,4 @@
++ATOM_DO(_NET_WM_ICON)
+ ATOM_DO(_NET_WM_WINDOW_TYPE)
+ ATOM_DO(_NET_WM_WINDOW_TYPE_DOCK)
+ ATOM_DO(_NET_WM_STRUT_PARTIAL)
+diff --git a/i3bar/src/ipc.c b/i3bar/src/ipc.c
+index 35a17aed..f82f4f77 100644
+--- a/i3bar/src/ipc.c
++++ b/i3bar/src/ipc.c
+@@ -49,6 +49,12 @@ static void got_command_reply(const unsigned char *reply, size_t size) {
+  * Called, when we get a reply with workspaces data
+  *
+  */
++static void got_scratchpad_reply(const unsigned char *reply, size_t size) {
++    DLOG("Received scratchpad list\n");
++    parse_scratchpad_json(reply, size);
++    draw_bars(false);
++}
++
+ static void got_workspace_reply(const unsigned char *reply, size_t size) {
+     DLOG("Got workspace data!\n");
+     parse_workspaces_json(reply, size);
+@@ -160,6 +166,8 @@ handler_t reply_handlers[] = {
+     NULL,                 /* I3_IPC_REPLY_TYPE_CONFIG */
+     NULL,                 /* I3_IPC_REPLY_TYPE_TICK */
+     NULL,                 /* I3_IPC_REPLY_TYPE_SYNC */
++    NULL,                 /* I3_IPC_REPLY_TYPE_GET_BINDING_STATE */
++    &got_scratchpad_reply, /* I3_IPC_REPLY_TYPE_SCRATCHPAD */
+ };
+ 
+ /*
+@@ -259,11 +267,20 @@ static void got_bar_config_update(const unsigned char *event, size_t size) {
+ }
+ 
+ /* Data structure to easily call the event handlers later */
++/*
++ * Called when a window event arrives. Any window event can change the set of
++ * minimized windows or their urgency, so refresh the chip list.
++ *
++ */
++static void got_window_event(const unsigned char *event, size_t size) {
++    i3_send_msg(I3_IPC_MESSAGE_TYPE_GET_SCRATCHPAD, NULL);
++}
++
+ handler_t event_handlers[] = {
+     &got_workspace_event,
+     &got_output_event,
+     &got_mode_event,
+-    NULL,
++    &got_window_event,
+     &got_bar_config_update,
+ };
+ 
+@@ -414,8 +431,9 @@ void destroy_connection(void) {
+  */
+ void subscribe_events(void) {
+     if (i3_provides_workspaces()) {
+-        i3_send_msg(I3_IPC_MESSAGE_TYPE_SUBSCRIBE, "[ \"workspace\", \"output\", \"mode\", \"barconfig_update\" ]");
++        i3_send_msg(I3_IPC_MESSAGE_TYPE_SUBSCRIBE, "[ \"workspace\", \"window\", \"output\", \"mode\", \"barconfig_update\" ]");
+     } else {
+         i3_send_msg(I3_IPC_MESSAGE_TYPE_SUBSCRIBE, "[ \"output\", \"mode\", \"barconfig_update\" ]");
+     }
++    i3_send_msg(I3_IPC_MESSAGE_TYPE_GET_SCRATCHPAD, NULL);
+ }
+diff --git a/i3bar/src/main.c b/i3bar/src/main.c
+index ce5257bf..987f8465 100644
+--- a/i3bar/src/main.c
++++ b/i3bar/src/main.c
+@@ -189,6 +189,8 @@ int main(int argc, char **argv) {
+ 
+     /* From here on everything should run smooth for itself, just start listening for
+      * events. We stop simply stop the event loop, when we are finished */
++    scratchpad_init();
++
+     ev_loop(main_loop, 0);
+ 
+     clean_xcb();
+diff --git a/i3bar/src/scratchpad.c b/i3bar/src/scratchpad.c
+new file mode 100644
+index 00000000..ea60fb16
+--- /dev/null
++++ b/i3bar/src/scratchpad.c
+@@ -0,0 +1,274 @@
++/*
++ * vim:ts=4:sw=4:expandtab
++ *
++ * i3bar - an xcb-based status- and ws-bar for i3
++ * © 2010 Axel Wagner and contributors (see also: LICENSE)
++ *
++ * scratchpad.c: Chips for minimized (scratchpad) windows, rendered next to
++ * the workspace buttons like a classic taskbar. The list comes from the
++ * GET_SCRATCHPAD IPC message, refreshed on every window event.
++ *
++ */
++#include "common.h"
++
++#include "i3/ipc.h"
++
++#include <ctype.h>
++#include <ev.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <yajl/yajl_parse.h>
++
++struct sp_head sp_items = TAILQ_HEAD_INITIALIZER(sp_items);
++
++bool sp_pulse_on = false;
++static ev_timer pulse_timer;
++
++extern xcb_connection_t *xcb_connection;
++
++/* The same atom enum xcb.c generates from xcb_atoms.def. */
++enum {
++#define ATOM_DO(name) name,
++#include "xcb_atoms.def"
++    NUM_ATOMS
++};
++extern xcb_atom_t atoms[];
++
++struct sp_json_params {
++    sp_item *walk;
++    char *cur_key;
++};
++
++static void sp_free_item(sp_item *item) {
++    if (item->letter != NULL) {
++        I3STRING_FREE(item->letter);
++    }
++    if (item->icon != NULL) {
++        cairo_surface_destroy(item->icon);
++    }
++    free(item);
++}
++
++/*
++ * Fetch _NET_WM_ICON for the window and convert the best-fitting frame to a
++ * premultiplied ARGB32 cairo surface.
++ *
++ */
++static void sp_fetch_icon(sp_item *item) {
++    xcb_get_property_cookie_t cookie = xcb_get_property(
++        xcb_connection, 0, item->window, atoms[_NET_WM_ICON],
++        XCB_ATOM_CARDINAL, 0, 256 * 1024);
++    xcb_get_property_reply_t *reply = xcb_get_property_reply(xcb_connection, cookie, NULL);
++    if (reply == NULL || reply->type != XCB_ATOM_CARDINAL || reply->format != 32) {
++        free(reply);
++        return;
++    }
++    const uint32_t len = xcb_get_property_value_length(reply) / 4;
++    const uint32_t *data = xcb_get_property_value(reply);
++
++    /* Frames are (width, height, pixels...); pick the smallest one that is
++     * still at least 24px, or the largest overall. */
++    const uint32_t target = 24;
++    uint32_t best_off = 0, best_w = 0, best_h = 0;
++    for (uint32_t off = 0; off + 2 <= len;) {
++        const uint32_t w = data[off], h = data[off + 1];
++        if (w == 0 || h == 0 || off + 2 + w * h > len) {
++            break;
++        }
++        const bool better = (best_w == 0) ||
++                            (w >= target && (best_w < target || w < best_w)) ||
++                            (w < target && best_w < target && w > best_w);
++        if (better) {
++            best_off = off + 2;
++            best_w = w;
++            best_h = h;
++        }
++        off += 2 + w * h;
++    }
++    if (best_w == 0) {
++        free(reply);
++        return;
++    }
++
++    cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, best_w, best_h);
++    if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
++        free(reply);
++        return;
++    }
++    uint32_t *pixels = (uint32_t *)cairo_image_surface_get_data(surface);
++    const int stride = cairo_image_surface_get_stride(surface) / 4;
++    for (uint32_t y = 0; y < best_h; y++) {
++        for (uint32_t x = 0; x < best_w; x++) {
++            const uint32_t argb = data[best_off + y * best_w + x];
++            const uint32_t a = argb >> 24;
++            const uint32_t r = ((argb >> 16) & 0xFF) * a / 255;
++            const uint32_t g = ((argb >> 8) & 0xFF) * a / 255;
++            const uint32_t b = (argb & 0xFF) * a / 255;
++            pixels[y * stride + x] = (a << 24) | (r << 16) | (g << 8) | b;
++        }
++    }
++    cairo_surface_mark_dirty(surface);
++    item->icon = surface;
++    item->icon_w = best_w;
++    item->icon_h = best_h;
++    free(reply);
++}
++
++static int sp_boolean_cb(void *params_, const int val) {
++    struct sp_json_params *params = params_;
++    if (params->cur_key != NULL && strcmp(params->cur_key, "urgent") == 0) {
++        params->walk->urgent = val;
++    }
++    FREE(params->cur_key);
++    return 1;
++}
++
++static int sp_integer_cb(void *params_, const long long val) {
++    struct sp_json_params *params = params_;
++    if (params->cur_key == NULL) {
++        return 1;
++    }
++    if (strcmp(params->cur_key, "id") == 0) {
++        params->walk->id = (long)val;
++    } else if (strcmp(params->cur_key, "window") == 0) {
++        params->walk->window = (uint32_t)val;
++    }
++    FREE(params->cur_key);
++    return 1;
++}
++
++static int sp_string_cb(void *params_, const unsigned char *val, const size_t len) {
++    struct sp_json_params *params = params_;
++    if (params->cur_key != NULL && strcmp(params->cur_key, "class") == 0 && len > 0) {
++        char letter[2] = {(char)toupper(val[0]), '\0'};
++        params->walk->letter = i3string_from_utf8(letter);
++    }
++    FREE(params->cur_key);
++    return 1;
++}
++
++static int sp_start_map_cb(void *params_) {
++    struct sp_json_params *params = params_;
++    params->walk = scalloc(1, sizeof(sp_item));
++    return 1;
++}
++
++static int sp_end_map_cb(void *params_) {
++    struct sp_json_params *params = params_;
++    TAILQ_INSERT_TAIL(&sp_items, params->walk, entries);
++    params->walk = NULL;
++    return 1;
++}
++
++static int sp_map_key_cb(void *params_, const unsigned char *keyVal, const size_t keyLen) {
++    struct sp_json_params *params = params_;
++    FREE(params->cur_key);
++    params->cur_key = sstrndup((const char *)keyVal, keyLen);
++    return 1;
++}
++
++static yajl_callbacks sp_callbacks = {
++    .yajl_boolean = sp_boolean_cb,
++    .yajl_integer = sp_integer_cb,
++    .yajl_string = sp_string_cb,
++    .yajl_start_map = sp_start_map_cb,
++    .yajl_end_map = sp_end_map_cb,
++    .yajl_map_key = sp_map_key_cb,
++};
++
++void parse_scratchpad_json(const unsigned char *json, size_t size) {
++    /* Keep the old list around so already-fetched icons can be reused.
++     * Move the elements (a TAILQ head must not be copied by value: the
++     * first element still points back at the old head). */
++    struct sp_head old;
++    TAILQ_INIT(&old);
++    while (!TAILQ_EMPTY(&sp_items)) {
++        sp_item *moved = TAILQ_FIRST(&sp_items);
++        TAILQ_REMOVE(&sp_items, moved, entries);
++        TAILQ_INSERT_TAIL(&old, moved, entries);
++    }
++
++    struct sp_json_params params = {NULL, NULL};
++    yajl_handle handle = yajl_alloc(&sp_callbacks, NULL, &params);
++    yajl_status state = yajl_parse(handle, json, size);
++    if (state != yajl_status_ok) {
++        ELOG("Could not parse scratchpad reply!\n");
++    }
++    yajl_complete_parse(handle);
++    yajl_free(handle);
++    FREE(params.cur_key);
++    if (params.walk != NULL) {
++        sp_free_item(params.walk);
++    }
++
++    sp_item *item;
++    TAILQ_FOREACH (item, &sp_items, entries) {
++        sp_item *old_walk, *found = NULL;
++        TAILQ_FOREACH (old_walk, &old, entries) {
++            if (old_walk->window == item->window && old_walk->icon != NULL) {
++                found = old_walk;
++                break;
++            }
++        }
++        if (found != NULL) {
++            item->icon = found->icon;
++            item->icon_w = found->icon_w;
++            item->icon_h = found->icon_h;
++            found->icon = NULL;
++        } else {
++            sp_fetch_icon(item);
++        }
++    }
++
++    while (!TAILQ_EMPTY(&old)) {
++        sp_item *old_item = TAILQ_FIRST(&old);
++        TAILQ_REMOVE(&old, old_item, entries);
++        sp_free_item(old_item);
++    }
++}
++
++int scratchpad_count(void) {
++    int n = 0;
++    sp_item *item;
++    TAILQ_FOREACH (item, &sp_items, entries) {
++        n++;
++    }
++    return n;
++}
++
++void scratchpad_restore(int index) {
++    sp_item *item;
++    TAILQ_FOREACH (item, &sp_items, entries) {
++        if (index-- == 0) {
++            char *buffer;
++            sasprintf(&buffer, "[con_id=\"%ld\"] scratchpad show", item->id);
++            i3_send_msg(I3_IPC_MESSAGE_TYPE_RUN_COMMAND, buffer);
++            free(buffer);
++            return;
++        }
++    }
++}
++
++static void pulse_cb(struct ev_loop *loop, ev_timer *timer, int revents) {
++    bool any_urgent = false;
++    sp_item *item;
++    TAILQ_FOREACH (item, &sp_items, entries) {
++        if (item->urgent) {
++            any_urgent = true;
++            break;
++        }
++    }
++    if (any_urgent) {
++        sp_pulse_on = !sp_pulse_on;
++        draw_bars(false);
++    } else if (sp_pulse_on) {
++        sp_pulse_on = false;
++        draw_bars(false);
++    }
++}
++
++void scratchpad_init(void) {
++    ev_timer_init(&pulse_timer, &pulse_cb, 0.55, 0.55);
++    ev_timer_start(main_loop, &pulse_timer);
++}
+diff --git a/i3bar/src/xcb.c b/i3bar/src/xcb.c
+index 2ae7fcde..0fdbc5a9 100644
+--- a/i3bar/src/xcb.c
++++ b/i3bar/src/xcb.c
+@@ -655,6 +655,26 @@ static void handle_button(xcb_button_press_event_t *event) {
+         }
+     }
+ 
++    /* Chip click. Press only: this handler also sees the release, and
++     * the restore command is a scratchpad toggle. */
++    if (clicked_ws == NULL && !TAILQ_EMPTY(&sp_items) &&
++        event->detail == XCB_BUTTON_CLICK_LEFT &&
++        (event->response_type & 0x7F) == XCB_BUTTON_PRESS) {
++        const int chip_w = bar_height + logical_px(6);
++        const int chip_sp = logical_px(4);
++        int chip_x = workspace_width + logical_px(10);
++        int sp_index = 0;
++        sp_item *sp_walk;
++        TAILQ_FOREACH (sp_walk, &sp_items, entries) {
++            if (x >= chip_x && x < chip_x + chip_w) {
++                scratchpad_restore(sp_index);
++                return;
++            }
++            chip_x += chip_w + chip_sp;
++            sp_index++;
++        }
++    }
++
+     if (child_want_click_events() && x > workspace_width) {
+         const int tray_width = get_tray_width(walk->trayclients);
+         /* Calculate the horizontal coordinate (x) of the start of the
+@@ -2169,6 +2189,59 @@ void draw_bars(bool unhide) {
+             }
+         }
+ 
++        /* Chips for minimized windows, taskbar-style. */
++        if (!config.disable_ws && !TAILQ_EMPTY(&sp_items)) {
++            const int chip_w = bar_height + logical_px(6);
++            const int chip_sp = logical_px(4);
++            workspace_width += logical_px(10);
++            sp_item *sp_walk;
++            TAILQ_FOREACH (sp_walk, &sp_items, entries) {
++                color_t chip_fg = colors.inactive_ws_fg;
++                color_t chip_bg = colors.inactive_ws_bg;
++                color_t chip_border = colors.inactive_ws_border;
++                if (sp_walk->urgent) {
++                    unhide = true;
++                    if (sp_pulse_on) {
++                        chip_fg = colors.urgent_ws_fg;
++                        chip_bg = colors.urgent_ws_bg;
++                        chip_border = colors.urgent_ws_border;
++                    }
++                }
++                draw_util_rectangle(&(outputs_walk->buffer), chip_border,
++                                    workspace_width, logical_px(1),
++                                    chip_w, bar_height - 2 * logical_px(1));
++                draw_util_rectangle(&(outputs_walk->buffer), chip_bg,
++                                    workspace_width + logical_px(1), 2 * logical_px(1),
++                                    chip_w - 2 * logical_px(1), bar_height - 4 * logical_px(1));
++                if (sp_walk->icon != NULL) {
++                    const int icon_size = bar_height - 2 * logical_px(4);
++                    const int icon_max = sp_walk->icon_w > sp_walk->icon_h ? sp_walk->icon_w : sp_walk->icon_h;
++                    const double scale = (double)icon_size / icon_max;
++                    cairo_t *cr = outputs_walk->buffer.cr;
++                    cairo_save(cr);
++                    cairo_translate(cr,
++                                    workspace_width + (chip_w - sp_walk->icon_w * scale) / 2.0,
++                                    (bar_height - sp_walk->icon_h * scale) / 2.0);
++                    cairo_scale(cr, scale, scale);
++                    cairo_set_source_surface(cr, sp_walk->icon, 0, 0);
++                    cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
++                    cairo_paint(cr);
++                    cairo_restore(cr);
++                } else if (sp_walk->letter != NULL) {
++                    const int letter_width = predict_text_width(sp_walk->letter);
++                    draw_util_text(sp_walk->letter, &(outputs_walk->buffer),
++                                   chip_fg, chip_bg,
++                                   workspace_width + (chip_w - letter_width) / 2,
++                                   bar_height / 2 - font.height / 2,
++                                   chip_w);
++                }
++                workspace_width += chip_w;
++                if (TAILQ_NEXT(sp_walk, entries) != NULL) {
++                    workspace_width += chip_sp;
++                }
++            }
++        }
++
+         if (binding.name && !config.disable_binding_mode_indicator) {
+             workspace_width += logical_px(ws_spacing_px);
+ 
+diff --git a/include/i3/ipc.h b/include/i3/ipc.h
+index 50fd155c..acb54860 100644
+--- a/include/i3/ipc.h
++++ b/include/i3/ipc.h
+@@ -69,6 +69,9 @@ typedef struct i3_ipc_header {
+ /** Request the current binding state. */
+ #define I3_IPC_MESSAGE_TYPE_GET_BINDING_STATE 12
+ 
++/** Request the list of scratchpad (minimized) windows. */
++#define I3_IPC_MESSAGE_TYPE_GET_SCRATCHPAD 13
++
+ /*
+  * Messages from i3 to clients
+  *
+@@ -86,6 +89,7 @@ typedef struct i3_ipc_header {
+ #define I3_IPC_REPLY_TYPE_TICK 10
+ #define I3_IPC_REPLY_TYPE_SYNC 11
+ #define I3_IPC_REPLY_TYPE_GET_BINDING_STATE 12
++#define I3_IPC_REPLY_TYPE_SCRATCHPAD 13
+ 
+ /*
+  * Events from i3 to clients. Events have the first bit set high.
+diff --git a/meson.build b/meson.build
+index babcaee7..c55eda8c 100644
+--- a/meson.build
++++ b/meson.build
+@@ -514,6 +514,7 @@ executable(
+     'i3bar/src/mode.c',
+     'i3bar/src/outputs.c',
+     'i3bar/src/parse_json_header.c',
++    'i3bar/src/scratchpad.c',
+     'i3bar/src/workspaces.c',
+     'i3bar/src/xcb.c',
+   ],
+diff --git a/src/ipc.c b/src/ipc.c
+index 894a622e..9c3218bb 100644
+--- a/src/ipc.c
++++ b/src/ipc.c
+@@ -1415,7 +1415,49 @@ IPC_HANDLER(get_binding_state) {
+ 
+ /* The index of each callback function corresponds to the numeric
+  * value of the message type (see include/i3/ipc.h) */
+-handler_t handlers[13] = {
++/*
++ * Formats the reply message for a GET_SCRATCHPAD request: one entry per
++ * scratchpad (minimized) window with what a taskbar needs to render it.
++ *
++ */
++IPC_HANDLER(get_scratchpad) {
++    yajl_gen gen = ygenalloc();
++    y(array_open);
++
++    Con *__i3_scratch = workspace_get("__i3_scratch");
++    Con *fl;
++    TAILQ_FOREACH (fl, &(__i3_scratch->floating_head), floating_windows) {
++        Con *leaf = con_descend_focused(fl);
++        if (leaf == NULL || leaf->window == NULL) {
++            continue;
++        }
++        y(map_open);
++        ystr("id");
++        y(integer, (uintptr_t)leaf);
++        ystr("window");
++        y(integer, leaf->window->id);
++        const char *leaf_name = leaf->window->name != NULL ? i3string_as_utf8(leaf->window->name) : "?";
++        const char *leaf_class = leaf->window->class_class != NULL ? leaf->window->class_class : "?";
++        ystr("name");
++        ystr(leaf_name);
++        ystr("class");
++        ystr(leaf_class);
++        ystr("urgent");
++        y(bool, leaf->urgent || fl->urgent);
++        y(map_close);
++    }
++
++    y(array_close);
++
++    const unsigned char *payload;
++    ylength length;
++    y(get_buf, &payload, &length);
++
++    ipc_send_client_message(client, length, I3_IPC_REPLY_TYPE_SCRATCHPAD, payload);
++    y(free);
++}
++
++handler_t handlers[14] = {
+     handle_run_command,
+     handle_get_workspaces,
+     handle_subscribe,
+@@ -1429,6 +1471,7 @@ handler_t handlers[13] = {
+     handle_send_tick,
+     handle_sync,
+     handle_get_binding_state,
++    handle_get_scratchpad,
+ };
+ 
+ /*
+-- 
+2.39.5
+

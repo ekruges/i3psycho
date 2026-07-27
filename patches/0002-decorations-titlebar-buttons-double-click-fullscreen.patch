@@ -1,0 +1,289 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ezra Kruger <ekruges@users.noreply.github.com>
+Date: Mon, 27 Jul 2026 01:32:23 -0400
+Subject: [PATCH 2/7] decorations: titlebar buttons + double-click fullscreen
+ for floating windows
+
+New deco_buttons module draws close / iconify / maximize glyphs on the
+left of floating titlebars using the existing titlebar text color, and
+route_click() hit-tests them before resize/drag handling. Iconify uses
+the scratchpad, maximize toggles fullscreen. Double-clicking the
+titlebar toggles fullscreen, the classic floating-WM behavior.
+---
+ include/all.h          |  1 +
+ include/deco_buttons.h | 50 +++++++++++++++++++++++++++++++++++
+ meson.build            |  1 +
+ src/click.c            | 29 ++++++++++++++++++++
+ src/deco_buttons.c     | 60 ++++++++++++++++++++++++++++++++++++++++++
+ src/x.c                | 34 +++++++++++++++++++-----
+ 6 files changed, 168 insertions(+), 7 deletions(-)
+ create mode 100644 include/deco_buttons.h
+ create mode 100644 src/deco_buttons.c
+
+diff --git a/include/all.h b/include/all.h
+index 1306ef23..418f56ee 100644
+--- a/include/all.h
++++ b/include/all.h
+@@ -45,6 +45,7 @@
+ #include "i3.h"
+ #include "x.h"
+ #include "click.h"
++#include "deco_buttons.h"
+ #include "key_press.h"
+ #include "floating.h"
+ #include "gaps.h"
+diff --git a/include/deco_buttons.h b/include/deco_buttons.h
+new file mode 100644
+index 00000000..ad6423e9
+--- /dev/null
++++ b/include/deco_buttons.h
+@@ -0,0 +1,50 @@
++/*
++ * vim:ts=4:sw=4:expandtab
++ *
++ * i3 - an improved tiling window manager
++ * © 2009 Michael Stapelberg and contributors (see also: LICENSE)
++ *
++ * deco_buttons.h: Titlebar buttons (close / iconify / maximize) for floating
++ * windows, in the tradition of classic floating window managers.
++ *
++ */
++#pragma once
++
++#include <config.h>
++
++#include "data.h"
++
++/* Button order, left to right (macOS-style placement on the left side). */
++typedef enum {
++    DECO_BUTTON_CLOSE = 0,
++    DECO_BUTTON_ICONIFY = 1,
++    DECO_BUTTON_MAXIMIZE = 2,
++    DECO_BUTTON_COUNT = 3
++} deco_button_t;
++
++/**
++ * Returns true if the given con gets titlebar buttons: a floating leaf
++ * window whose decoration is tall enough and wide enough to hold them.
++ *
++ */
++bool deco_buttons_visible(Con *con);
++
++/**
++ * Total width of the button area in pixels. Each button occupies a square
++ * slot of deco_rect.height pixels.
++ *
++ */
++int deco_buttons_width(Con *con);
++
++/**
++ * Returns the button at the given x offset (relative to the decoration),
++ * or -1 if the offset is outside the button area.
++ *
++ */
++int deco_button_at(Con *con, int x);
++
++/**
++ * Performs the action for the given button on the given con.
++ *
++ */
++void deco_button_press(Con *con, deco_button_t button);
+diff --git a/meson.build b/meson.build
+index afff3305..babcaee7 100644
+--- a/meson.build
++++ b/meson.build
+@@ -381,6 +381,7 @@ i3srcs = [
+   'src/assignments.c',
+   'src/bindings.c',
+   'src/click.c',
++  'src/deco_buttons.c',
+   'src/commands.c',
+   'src/commands_parser.c',
+   'src/con.c',
+diff --git a/src/click.c b/src/click.c
+index f3388dbe..41f9ab4c 100644
+--- a/src/click.c
++++ b/src/click.c
+@@ -286,6 +286,35 @@ static void route_click(Con *con, xcb_button_press_event_t *event, const click_d
+             return;
+         }
+ 
++        /* 5b: titlebar buttons (close / iconify / maximize). They win over
++         * resize/drag handling, like in classic floating window managers. */
++        if (dest == CLICK_DECORATION && is_left_click && !mod_pressed) {
++            const int deco_button = deco_button_at(con, event->event_x - con->deco_rect.x);
++            if (deco_button >= 0) {
++                deco_button_press(con, (deco_button_t)deco_button);
++                xcb_allow_events(conn, XCB_ALLOW_ASYNC_POINTER, event->time);
++                xcb_flush(conn);
++                return;
++            }
++        }
++
++        /* 5c: double-clicking the titlebar toggles fullscreen (the classic
++         * titlebar double-click maximize). */
++        static xcb_window_t last_deco_frame = XCB_NONE;
++        static xcb_timestamp_t last_deco_time = 0;
++        if (dest == CLICK_DECORATION && is_left_click && !mod_pressed) {
++            if (event->event == last_deco_frame &&
++                event->time - last_deco_time < 400) {
++                last_deco_frame = XCB_NONE;
++                con_toggle_fullscreen(con, CF_OUTPUT);
++                tree_render();
++                allow_replay_pointer(event->time);
++                return;
++            }
++            last_deco_frame = event->event;
++            last_deco_time = event->time;
++        }
++
+         /*  6: resize (floating) if this was a (left or right) click on the
+          * left/right/bottom border, or a right click on the decoration.
+          * also try resizing (tiling) if possible */
+diff --git a/src/deco_buttons.c b/src/deco_buttons.c
+new file mode 100644
+index 00000000..0332fec6
+--- /dev/null
++++ b/src/deco_buttons.c
+@@ -0,0 +1,60 @@
++/*
++ * vim:ts=4:sw=4:expandtab
++ *
++ * i3 - an improved tiling window manager
++ * © 2009 Michael Stapelberg and contributors (see also: LICENSE)
++ *
++ * deco_buttons.c: Titlebar buttons (close / iconify / maximize) for floating
++ * windows. Close kills the window, iconify moves it to the scratchpad (i3’s
++ * native iconification), maximize toggles fullscreen. Buttons are drawn by
++ * x_draw_decoration() and hit-tested from route_click().
++ *
++ */
++#include "all.h"
++
++bool deco_buttons_visible(Con *con) {
++    if (con->window == NULL) {
++        return false;
++    }
++    if (con_inside_floating(con) == NULL) {
++        return false;
++    }
++    if (con->deco_rect.height == 0) {
++        return false;
++    }
++    /* Leave the majority of the titlebar for dragging and the title. */
++    return (int)con->deco_rect.width > deco_buttons_width(con) * 2;
++}
++
++int deco_buttons_width(Con *con) {
++    return DECO_BUTTON_COUNT * (int)con->deco_rect.height;
++}
++
++int deco_button_at(Con *con, int x) {
++    if (!deco_buttons_visible(con)) {
++        return -1;
++    }
++    if (x < 0 || x >= deco_buttons_width(con)) {
++        return -1;
++    }
++    return x / (int)con->deco_rect.height;
++}
++
++void deco_button_press(Con *con, deco_button_t button) {
++    DLOG("titlebar button %d pressed for con %p\n", button, con);
++    switch (button) {
++        case DECO_BUTTON_CLOSE:
++            tree_close_internal(con, KILL_WINDOW, false);
++            break;
++        case DECO_BUTTON_ICONIFY:
++            scratchpad_move(con);
++            break;
++        case DECO_BUTTON_MAXIMIZE:
++            con_toggle_fullscreen(con, CF_OUTPUT);
++            break;
++        default:
++            ELOG("BUG: invalid titlebar button %d\n", button);
++            return;
++    }
++    tree_render();
++}
+diff --git a/src/x.c b/src/x.c
+index 87ee05c2..bb040855 100644
+--- a/src/x.c
++++ b/src/x.c
+@@ -642,6 +642,26 @@ void x_draw_decoration(Con *con) {
+     const int deco_width = (int)con->deco_rect.width;
+     const int title_padding = logical_px(2);
+ 
++    /* 5b: draw the titlebar buttons (close / iconify / maximize) for
++     * floating windows. Bare glyphs in the titlebar text color, so the
++     * existing client.* color classes theme them unchanged. */
++    int buttons_space = 0;
++    if (deco_buttons_visible(con)) {
++        const int slot = (int)con->deco_rect.height;
++        static const char *glyphs[DECO_BUTTON_COUNT] = {"×", "−", "+"};
++        for (int i = 0; i < DECO_BUTTON_COUNT; i++) {
++            i3String *glyph = i3string_from_utf8(glyphs[i]);
++            const int glyph_width = predict_text_width(glyph);
++            draw_util_text(glyph, dest_surface,
++                           p->color->text, p->color->background,
++                           con->deco_rect.x + i * slot + (slot - glyph_width) / 2,
++                           con->deco_rect.y + text_offset_y,
++                           slot);
++            I3STRING_FREE(glyph);
++        }
++        buttons_space = deco_buttons_width(con) + title_padding;
++    }
++
+     int mark_width = 0;
+     if (config.show_marks && !TAILQ_EMPTY(&(con->marks_head))) {
+         char *formatted_mark = sstrdup("");
+@@ -665,7 +685,7 @@ void x_draw_decoration(Con *con) {
+             mark_width = predict_text_width(mark);
+ 
+             int mark_offset_x = (config.title_align == ALIGN_RIGHT)
+-                                    ? title_padding
++                                    ? title_padding + buttons_space
+                                     : deco_width - mark_width - title_padding;
+ 
+             draw_util_text(mark, dest_surface,
+@@ -717,8 +737,8 @@ void x_draw_decoration(Con *con) {
+             /* (pad)[(pad)(icon)(pad)][text    ](pad)[mark + its pad)
+              *             ^           ^--- title_offset_x
+              *             ^--- icon_offset_x */
+-            icon_offset_x = icon_padding;
+-            title_offset_x = title_padding + total_icon_space;
++            icon_offset_x = buttons_space + icon_padding;
++            title_offset_x = buttons_space + title_padding + total_icon_space;
+             break;
+         case ALIGN_CENTER:
+             /* (pad)[  ][(pad)(icon)(pad)][text  ](pad)[mark + its pad)
+@@ -729,14 +749,14 @@ void x_draw_decoration(Con *con) {
+              * by two the total available area. That's the decoration width
+              * minus the elements that come after icon_offset_x (icon, its
+              * padding, text, marks). */
+-            icon_offset_x = max(icon_padding, (deco_width - icon_padding - icon_size - predict_text_width(title) - title_padding - mark_width) / 2);
+-            title_offset_x = max(title_padding, icon_offset_x + icon_padding + icon_size);
++            icon_offset_x = max(buttons_space + icon_padding, (deco_width - icon_padding - icon_size - predict_text_width(title) - title_padding - mark_width) / 2);
++            title_offset_x = max(buttons_space + title_padding, icon_offset_x + icon_padding + icon_size);
+             break;
+         case ALIGN_RIGHT:
+             /* [mark + its pad](pad)[    text][(pad)(icon)(pad)](pad)
+              *                           ^           ^--- icon_offset_x
+              *                           ^--- title_offset_x */
+-            title_offset_x = max(title_padding + mark_width, deco_width - title_padding - predict_text_width(title) - total_icon_space);
++            title_offset_x = max(buttons_space + title_padding + mark_width, deco_width - title_padding - predict_text_width(title) - total_icon_space);
+             /* Make sure the icon does not escape title boundaries */
+             icon_offset_x = min(deco_width - icon_size - icon_padding - title_padding, title_offset_x + predict_text_width(title) + icon_padding);
+             break;
+@@ -749,7 +769,7 @@ void x_draw_decoration(Con *con) {
+                    p->color->text, p->color->background,
+                    con->deco_rect.x + title_offset_x,
+                    con->deco_rect.y + text_offset_y,
+-                   deco_width - mark_width - 2 * title_padding - total_icon_space);
++                   deco_width - mark_width - 2 * title_padding - total_icon_space - buttons_space);
+     if (has_icon) {
+         draw_util_image(
+             win->icon,
+-- 
+2.39.5
+

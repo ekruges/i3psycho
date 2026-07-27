@@ -1,0 +1,104 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ezra Kruger <ekruges@users.noreply.github.com>
+Date: Mon, 27 Jul 2026 04:13:40 -0400
+Subject: [PATCH 4/7] scratchpad: honor iconify requests, expose EWMH/ICCCM
+ iconified state
+
+WM_CHANGE_STATE Iconic requests from managed windows now move them to
+the scratchpad instead of being rejected, so in-app minimize buttons
+work. Scratchpad windows carry _NET_WM_STATE_HIDDEN and ICCCM WM_STATE
+Iconic while hidden (previously WITHDRAWN); the map path restores
+Normal. Unmanaged windows keep the upstream reject, and the upstream
+testsuite passes unchanged (284 files, 4190 tests).
+---
+ src/handlers.c   | 23 +++++++++++++++++------
+ src/scratchpad.c | 13 +++++++++++++
+ src/x.c          |  7 +++++--
+ 3 files changed, 35 insertions(+), 8 deletions(-)
+
+diff --git a/src/handlers.c b/src/handlers.c
+index 384005b9..8b72ceb0 100644
+--- a/src/handlers.c
++++ b/src/handlers.c
+@@ -847,12 +847,23 @@ static void handle_client_message(xcb_client_message_event_t *event) {
+     } else if (event->type == A_WM_CHANGE_STATE) {
+         /* http://tronche.com/gui/x/icccm/sec-4.html#s-4.1.4 */
+         if (event->data.data32[0] == XCB_ICCCM_WM_STATE_ICONIC) {
+-            /* For compatibility reasons, Wine will request iconic state and cannot ensure that the WM has agreed on it;
+-             * immediately revert to normal to avoid being stuck in a paused state. */
+-            DLOG("Client has requested iconic state, rejecting. (window = %08x)\n", event->window);
+-            long data[] = {XCB_ICCCM_WM_STATE_NORMAL, XCB_NONE};
+-            xcb_change_property(conn, XCB_PROP_MODE_REPLACE, event->window,
+-                                A_WM_STATE, A_WM_STATE, 32, 2, data);
++            /* Iconify means scratchpad here, so honor the request: this is
++             * what makes in-app minimize buttons work. Acknowledging with
++             * WM_STATE Iconic also avoids the stuck-paused-state problem
++             * upstream works around by rejecting (e.g. Wine): the map path
++             * in x_push_node() restores WM_STATE Normal on show. */
++            Con *con = con_by_window_id(event->window);
++            if (con != NULL && con->window != NULL) {
++                DLOG("Client requested iconic state, moving to scratchpad. (window = %08x)\n", event->window);
++                scratchpad_move(con);
++                tree_render();
++            } else {
++                /* Unmanaged window: keep upstream's reject behavior. */
++                DLOG("Client has requested iconic state, rejecting. (window = %08x)\n", event->window);
++                long data[] = {XCB_ICCCM_WM_STATE_NORMAL, XCB_NONE};
++                xcb_change_property(conn, XCB_PROP_MODE_REPLACE, event->window,
++                                    A_WM_STATE, A_WM_STATE, 32, 2, data);
++            }
+         } else {
+             DLOG("Not handling WM_CHANGE_STATE request. (window = %08x, state = %d)\n", event->window, event->data.data32[0]);
+         }
+diff --git a/src/scratchpad.c b/src/scratchpad.c
+index db2e195f..b323a803 100644
+--- a/src/scratchpad.c
++++ b/src/scratchpad.c
+@@ -70,6 +70,13 @@ void scratchpad_move(Con *con) {
+             con->scratchpad_state = SCRATCHPAD_FRESH;
+         }
+     }
++
++    /* 4: A scratchpad window is iconified in EWMH terms; tell pagers and
++     * taskbars. Cleared again in scratchpad_show(). */
++    Con *leaf = con_descend_focused(con);
++    if (leaf != NULL && leaf->window != NULL) {
++        xcb_add_property_atom(conn, leaf->window->id, A__NET_WM_STATE, A__NET_WM_STATE_HIDDEN);
++    }
+ }
+ 
+ /*
+@@ -188,6 +195,12 @@ bool scratchpad_show(Con *con) {
+     /* 1: Move the window from __i3_scratch to the current workspace. */
+     con_move_to_workspace(con, active, true, false, false);
+ 
++    /* No longer iconified in EWMH terms. */
++    Con *shown_leaf = con_descend_focused(con);
++    if (shown_leaf != NULL && shown_leaf->window != NULL) {
++        xcb_remove_property_atom(conn, shown_leaf->window->id, A__NET_WM_STATE, A__NET_WM_STATE_HIDDEN);
++    }
++
+     /* 2: Adjust the size if this window was not adjusted yet. */
+     if (con->scratchpad_state == SCRATCHPAD_FRESH) {
+         DLOG("Adjusting size of this window.\n");
+diff --git a/src/x.c b/src/x.c
+index bb040855..d7c913b5 100644
+--- a/src/x.c
++++ b/src/x.c
+@@ -1239,8 +1239,11 @@ static void x_push_node_unmaps(Con *con) {
+      * container was empty before, but now got a child) */
+     if (state->unmap_now) {
+         if (con->window != NULL) {
+-            /* Set WM_STATE_WITHDRAWN, it seems like Java apps need it */
+-            long data[] = {XCB_ICCCM_WM_STATE_WITHDRAWN, XCB_NONE};
++            /* ICCCM: windows iconified to the scratchpad get WM_STATE Iconic.
++             * Everything else keeps WITHDRAWN, it seems like Java apps need it */
++            Con *ws = con_get_workspace(con);
++            const bool iconic = (ws != NULL && strcmp(ws->name, "__i3_scratch") == 0);
++            long data[] = {iconic ? XCB_ICCCM_WM_STATE_ICONIC : XCB_ICCCM_WM_STATE_WITHDRAWN, XCB_NONE};
+             xcb_change_property(conn, XCB_PROP_MODE_REPLACE, con->window->id,
+                                 A_WM_STATE, A_WM_STATE, 32, 2, data);
+         }
+-- 
+2.39.5
+

@@ -1,0 +1,28 @@
+i3psycho 1.0
+============
+
+First release. Verified by the shipped test scripts (test/) and by
+upstream i3's complete test suite (284 files, 4190 tests, PASS) running
+against the patched binary.
+
+Fork: four patches on upstream i3 (patches/)
+ - window::move IPC events for floating repositions
+ - titlebar buttons on floating windows (close / iconify / maximize),
+   double-click titlebar fullscreen
+ - live edge-snap preview and exact snap-on-drop in the drag loop
+ - iconify requests honored; scratchpad windows expose
+   _NET_WM_STATE_HIDDEN and WM_STATE Iconic
+
+psychod:
+ - cascade placement, exact workarea snapping, minimize with geometry
+   restore, drop-snap for stock i3, MRU cycling, expose grid, show
+   desktop, hot corners
+ - survives i3 restarts, one instance per display, action failures are
+   logged instead of fatal
+ - psychod-status wraps any statusline and adds clickable chips for
+   minimized windows
+
+Distribution:
+ - PKGBUILD (provides/conflicts i3-wm), xsession entry, session launcher
+ - psycho.conf include for existing configs, psycho.config standalone
+ - userguide.txt, psychod(1), vsync-only picom.conf

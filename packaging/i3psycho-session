@@ -1,0 +1,9 @@
+#!/bin/sh
+# i3psycho session launcher: respect the user's own i3 config if they have
+# one (they can `include` the psycho layer); otherwise run the full psycho
+# default so the first login is the real experience.
+if [ -e "${XDG_CONFIG_HOME:-$HOME/.config}/i3/config" ] || [ -e "$HOME/.i3/config" ]; then
+    exec i3
+else
+    exec i3 -c /usr/share/i3psycho/psycho.config
+fi

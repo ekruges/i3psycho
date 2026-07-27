@@ -1,0 +1,59 @@
+# Maintainer: Ezra Kruger <kruger.ezra.s@gmail.com>
+# i3psycho: floating-first i3. Patched i3 (4 patches on upstream master) +
+# the psychod companion daemon. Follows the i3-gaps packaging model.
+pkgname=i3psycho
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="i3 for psychopaths: floating-first i3 with macOS-grade window behavior"
+arch=('x86_64')
+url="https://github.com/ekruges/i3psycho-wip"
+license=('BSD')
+provides=('i3-wm')
+conflicts=('i3-wm' 'i3-gaps')
+depends=('libxcb' 'xcb-util-keysyms' 'xcb-util-wm' 'xcb-util-cursor'
+         'xcb-util-xrm' 'libev' 'yajl' 'startup-notification' 'pango'
+         'perl' 'python-i3ipc' 'xdotool')
+makedepends=('git' 'meson' 'asciidoc')
+optdepends=('picom: tear-free moves (use the shipped vsync-only config)'
+            'i3status: default statusline wrapped by psychod-status')
+# pin the upstream commit the patch series is based on; bump together
+_i3_commit=f7d5b898
+source=("i3::git+https://github.com/i3/i3#commit=${_i3_commit}"
+        '0001-ipc-emit-window-move-events-for-floating-repositions.patch'
+        '0002-decorations-titlebar-buttons-double-click-fullscreen.patch'
+        '0003-floating-edge-snap-preview-and-snap-on-drop-in-the-d.patch'
+        '0004-scratchpad-honor-iconify-requests-expose-EWMH-ICCCM-.patch'
+        '0005-ipc-i3bar-taskbar-chips-for-minimized-windows.patch'
+        '0006-scratchpad-minimize-and-restore-genie-animation.patch'
+        '0007-config-psycho_-directives.patch'
+        'psychod.py' 'psycho.conf' 'psycho.config'
+        'picom.conf' 'i3status.conf' 'psychod.1'
+        'i3psycho.desktop' 'i3psycho-session' 'USERGUIDE.md')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+prepare() {
+  cd i3
+  git apply ../000?-*.patch
+}
+
+build() {
+  cd i3
+  arch-meson build --buildtype=release
+  meson compile -C build
+}
+
+package() {
+  cd i3
+  DESTDIR="$pkgdir" meson install -C build
+  cd ..
+  install -Dm755 psychod.py "$pkgdir/usr/bin/psychod"
+  install -Dm755 i3psycho-session "$pkgdir/usr/bin/i3psycho-session"
+  install -Dm644 i3psycho.desktop "$pkgdir/usr/share/xsessions/i3psycho.desktop"
+  install -Dm644 psycho.conf "$pkgdir/usr/share/i3psycho/psycho.conf"
+  install -Dm644 psycho.config "$pkgdir/usr/share/i3psycho/psycho.config"
+  install -Dm644 picom.conf "$pkgdir/usr/share/i3psycho/picom.conf"
+  install -Dm644 i3status.conf "$pkgdir/usr/share/i3psycho/i3status.conf"
+  install -Dm644 psychod.1 "$pkgdir/usr/share/man/man1/psychod.1"
+  install -Dm644 USERGUIDE.md "$pkgdir/usr/share/doc/i3psycho/USERGUIDE.md"
+  install -Dm644 i3/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

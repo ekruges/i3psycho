@@ -1,0 +1,306 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ezra Kruger <ekruges@users.noreply.github.com>
+Date: Mon, 27 Jul 2026 07:02:38 -0400
+Subject: [PATCH 7/7] config: psycho_* directives
+
+psycho_genie_duration <ms>, psycho_titlebar_buttons,
+psycho_double_click_titlebar, psycho_snap_edges,
+psycho_snap_margin <px>, psycho_chips. All optional; defaults match
+the shipped behavior (140ms genie, everything on, 10px margin).
+Colors intentionally reuse client.* and the bar workspace classes.
+---
+ include/config_directives.h     |  6 +++++
+ include/configuration.h         | 10 ++++++++
+ parser-specs/config.spec        | 36 ++++++++++++++++++++++++++++
+ src/click.c                     |  3 ++-
+ src/config.c                    |  6 +++++
+ src/config_directives.c         | 24 +++++++++++++++++++
+ src/deco_buttons.c              |  3 +++
+ src/floating.c                  | 12 ++++++----
+ src/ipc.c                       | 42 +++++++++++++++++----------------
+ testcases/t/201-config-parser.t |  6 +++++
+ 10 files changed, 122 insertions(+), 26 deletions(-)
+
+diff --git a/include/config_directives.h b/include/config_directives.h
+index fd384c0c..30ca2126 100644
+--- a/include/config_directives.h
++++ b/include/config_directives.h
+@@ -52,6 +52,12 @@ CFGFUN(default_orientation, const char *orientation);
+ CFGFUN(workspace_layout, const char *layout);
+ CFGFUN(workspace_back_and_forth, const char *value);
+ CFGFUN(focus_follows_mouse, const char *value);
++CFGFUN(psycho_genie_duration, const long duration);
++CFGFUN(psycho_titlebar_buttons, const char *value);
++CFGFUN(psycho_double_click_titlebar, const char *value);
++CFGFUN(psycho_snap_edges, const char *value);
++CFGFUN(psycho_snap_margin, const long margin);
++CFGFUN(psycho_chips, const char *value);
+ CFGFUN(mouse_warping, const char *value);
+ CFGFUN(focus_wrapping, const char *value);
+ CFGFUN(force_focus_wrapping, const char *value);
+diff --git a/include/configuration.h b/include/configuration.h
+index c062ae4c..96cbe4f0 100644
+--- a/include/configuration.h
++++ b/include/configuration.h
+@@ -211,6 +211,16 @@ struct Config {
+      * decoration. Marks starting with a "_" will be ignored either way. */
+     bool show_marks;
+ 
++    /* i3psycho: genie duration in ms (0 disables), titlebar buttons,
++     * double-click-titlebar fullscreen, drag-edge snapping and its pointer
++     * margin, taskbar chips. */
++    int psycho_genie_duration;
++    bool psycho_titlebar_buttons;
++    bool psycho_double_click_titlebar;
++    bool psycho_snap_edges;
++    int psycho_snap_margin;
++    bool psycho_chips;
++
+     /** Title alignment options. */
+     enum {
+         ALIGN_LEFT,
+diff --git a/parser-specs/config.spec b/parser-specs/config.spec
+index d1528374..ffc2420a 100644
+--- a/parser-specs/config.spec
++++ b/parser-specs/config.spec
+@@ -40,6 +40,12 @@ state INITIAL:
+   'assign'                                 -> ASSIGN
+   'no_focus'                               -> NO_FOCUS
+   'focus_follows_mouse'                    -> FOCUS_FOLLOWS_MOUSE
++  'psycho_genie_duration'                  -> PSYCHO_GENIE_DURATION
++  'psycho_titlebar_buttons'                -> PSYCHO_TITLEBAR_BUTTONS
++  'psycho_double_click_titlebar'           -> PSYCHO_DOUBLE_CLICK_TITLEBAR
++  'psycho_snap_edges'                      -> PSYCHO_SNAP_EDGES
++  'psycho_snap_margin'                     -> PSYCHO_SNAP_MARGIN
++  'psycho_chips'                           -> PSYCHO_CHIPS
+   'mouse_warping'                          -> MOUSE_WARPING
+   'focus_wrapping'                         -> FOCUS_WRAPPING
+   'force_focus_wrapping'                   -> FORCE_FOCUS_WRAPPING
+@@ -273,6 +279,36 @@ state CRITERION_STR:
+   cvalue = word
+       -> call cfg_criteria_add($ctype, $cvalue); CRITERIA
+ 
++# psycho_genie_duration <ms> (0 disables)
++state PSYCHO_GENIE_DURATION:
++  duration = number
++      -> call cfg_psycho_genie_duration(&duration)
++
++# psycho_titlebar_buttons bool
++state PSYCHO_TITLEBAR_BUTTONS:
++  value = word
++      -> call cfg_psycho_titlebar_buttons($value)
++
++# psycho_double_click_titlebar bool
++state PSYCHO_DOUBLE_CLICK_TITLEBAR:
++  value = word
++      -> call cfg_psycho_double_click_titlebar($value)
++
++# psycho_snap_edges bool
++state PSYCHO_SNAP_EDGES:
++  value = word
++      -> call cfg_psycho_snap_edges($value)
++
++# psycho_snap_margin <px>
++state PSYCHO_SNAP_MARGIN:
++  margin = number
++      -> call cfg_psycho_snap_margin(&margin)
++
++# psycho_chips bool
++state PSYCHO_CHIPS:
++  value = word
++      -> call cfg_psycho_chips($value)
++
+ # focus_follows_mouse bool
+ state FOCUS_FOLLOWS_MOUSE:
+   value = word
+diff --git a/src/click.c b/src/click.c
+index 41f9ab4c..e3660875 100644
+--- a/src/click.c
++++ b/src/click.c
+@@ -302,7 +302,8 @@ static void route_click(Con *con, xcb_button_press_event_t *event, const click_d
+          * titlebar double-click maximize). */
+         static xcb_window_t last_deco_frame = XCB_NONE;
+         static xcb_timestamp_t last_deco_time = 0;
+-        if (dest == CLICK_DECORATION && is_left_click && !mod_pressed) {
++        if (config.psycho_double_click_titlebar &&
++            dest == CLICK_DECORATION && is_left_click && !mod_pressed) {
+             if (event->event == last_deco_frame &&
+                 event->time - last_deco_time < 400) {
+                 last_deco_frame = XCB_NONE;
+diff --git a/src/config.c b/src/config.c
+index 884052fd..6dfa9f4e 100644
+--- a/src/config.c
++++ b/src/config.c
+@@ -207,6 +207,12 @@ bool load_configuration(const char *override_configpath, config_load_t load_type
+     INIT_COLOR(config.bar.urgent, "#2f343a", "#900000", "#ffffff", "#000000");
+ 
+     config.show_marks = true;
++    config.psycho_genie_duration = 140;
++    config.psycho_titlebar_buttons = true;
++    config.psycho_double_click_titlebar = true;
++    config.psycho_snap_edges = true;
++    config.psycho_snap_margin = 10;
++    config.psycho_chips = true;
+ 
+     config.default_border = BS_NORMAL;
+     config.default_floating_border = BS_NORMAL;
+diff --git a/src/config_directives.c b/src/config_directives.c
+index 52ab6e14..3af3a0cc 100644
+--- a/src/config_directives.c
++++ b/src/config_directives.c
+@@ -444,6 +444,30 @@ CFGFUN(hide_edge_borders, const char *borders) {
+     }
+ }
+ 
++CFGFUN(psycho_genie_duration, const long duration) {
++    config.psycho_genie_duration = duration;
++}
++
++CFGFUN(psycho_titlebar_buttons, const char *value) {
++    config.psycho_titlebar_buttons = boolstr(value);
++}
++
++CFGFUN(psycho_double_click_titlebar, const char *value) {
++    config.psycho_double_click_titlebar = boolstr(value);
++}
++
++CFGFUN(psycho_snap_edges, const char *value) {
++    config.psycho_snap_edges = boolstr(value);
++}
++
++CFGFUN(psycho_snap_margin, const long margin) {
++    config.psycho_snap_margin = margin;
++}
++
++CFGFUN(psycho_chips, const char *value) {
++    config.psycho_chips = boolstr(value);
++}
++
+ CFGFUN(focus_follows_mouse, const char *value) {
+     config.disable_focus_follows_mouse = !boolstr(value);
+ }
+diff --git a/src/deco_buttons.c b/src/deco_buttons.c
+index 0332fec6..c9cbf38a 100644
+--- a/src/deco_buttons.c
++++ b/src/deco_buttons.c
+@@ -13,6 +13,9 @@
+ #include "all.h"
+ 
+ bool deco_buttons_visible(Con *con) {
++    if (!config.psycho_titlebar_buttons) {
++        return false;
++    }
+     if (con->window == NULL) {
+         return false;
+     }
+diff --git a/src/floating.c b/src/floating.c
+index 39c70917..1918d306 100644
+--- a/src/floating.c
++++ b/src/floating.c
+@@ -590,7 +590,7 @@ static snap_region_t snap_current = SNAP_NONE;
+ static xcb_window_t snap_preview = XCB_NONE;
+ 
+ static snap_region_t snap_region_at(Rect wa, uint32_t px, uint32_t py) {
+-    const int m = logical_px(10);
++    const int m = logical_px(config.psycho_snap_margin);
+     const bool left = (int)px <= (int)wa.x + m;
+     const bool right = (int)px >= (int)(wa.x + wa.width) - m;
+     const bool top = (int)py <= (int)wa.y + m;
+@@ -686,7 +686,7 @@ static void snap_preview_hide(void) {
+ }
+ 
+ void floating_genie_animate(Rect from, Rect to) {
+-    int duration_ms = 220;
++    int duration_ms = config.psycho_genie_duration;
+     const char *env = getenv("I3PSYCHO_GENIE_MS");
+     if (env != NULL) {
+         duration_ms = atoi(env);
+@@ -747,9 +747,11 @@ DRAGGING_CB(drag_window_callback) {
+     x_push_node(con);
+     xcb_flush(conn);
+ 
+-    Con *snap_ws = con_get_workspace(con);
+-    if (snap_ws != NULL) {
+-        snap_preview_update(con, snap_region_at(snap_ws->rect, new_x, new_y));
++    if (config.psycho_snap_edges) {
++        Con *snap_ws = con_get_workspace(con);
++        if (snap_ws != NULL) {
++            snap_preview_update(con, snap_region_at(snap_ws->rect, new_x, new_y));
++        }
+     }
+ 
+     /* Check if we cross workspace boundaries while moving */
+diff --git a/src/ipc.c b/src/ipc.c
+index 9c3218bb..d2b86785 100644
+--- a/src/ipc.c
++++ b/src/ipc.c
+@@ -1424,27 +1424,29 @@ IPC_HANDLER(get_scratchpad) {
+     yajl_gen gen = ygenalloc();
+     y(array_open);
+ 
+-    Con *__i3_scratch = workspace_get("__i3_scratch");
+-    Con *fl;
+-    TAILQ_FOREACH (fl, &(__i3_scratch->floating_head), floating_windows) {
+-        Con *leaf = con_descend_focused(fl);
+-        if (leaf == NULL || leaf->window == NULL) {
+-            continue;
++    if (config.psycho_chips) {
++        Con *__i3_scratch = workspace_get("__i3_scratch");
++        Con *fl;
++        TAILQ_FOREACH (fl, &(__i3_scratch->floating_head), floating_windows) {
++            Con *leaf = con_descend_focused(fl);
++            if (leaf == NULL || leaf->window == NULL) {
++                continue;
++            }
++            y(map_open);
++            ystr("id");
++            y(integer, (uintptr_t)leaf);
++            ystr("window");
++            y(integer, leaf->window->id);
++            const char *leaf_name = leaf->window->name != NULL ? i3string_as_utf8(leaf->window->name) : "?";
++            const char *leaf_class = leaf->window->class_class != NULL ? leaf->window->class_class : "?";
++            ystr("name");
++            ystr(leaf_name);
++            ystr("class");
++            ystr(leaf_class);
++            ystr("urgent");
++            y(bool, leaf->urgent || fl->urgent);
++            y(map_close);
+         }
+-        y(map_open);
+-        ystr("id");
+-        y(integer, (uintptr_t)leaf);
+-        ystr("window");
+-        y(integer, leaf->window->id);
+-        const char *leaf_name = leaf->window->name != NULL ? i3string_as_utf8(leaf->window->name) : "?";
+-        const char *leaf_class = leaf->window->class_class != NULL ? leaf->window->class_class : "?";
+-        ystr("name");
+-        ystr(leaf_name);
+-        ystr("class");
+-        ystr(leaf_class);
+-        ystr("urgent");
+-        y(bool, leaf->urgent || fl->urgent);
+-        y(map_close);
+     }
+ 
+     y(array_close);
+diff --git a/testcases/t/201-config-parser.t b/testcases/t/201-config-parser.t
+index 47a7e529..77ba3712 100644
+--- a/testcases/t/201-config-parser.t
++++ b/testcases/t/201-config-parser.t
+@@ -534,6 +534,12 @@ my $expected_all_tokens = "ERROR: CONFIG: Expected one of these tokens: <end>, '
+         assign
+         no_focus
+         focus_follows_mouse
++        psycho_genie_duration
++        psycho_titlebar_buttons
++        psycho_double_click_titlebar
++        psycho_snap_edges
++        psycho_snap_margin
++        psycho_chips
+         mouse_warping
+         focus_wrapping
+         force_focus_wrapping
+-- 
+2.39.5
+

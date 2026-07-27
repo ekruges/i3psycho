@@ -1,0 +1,184 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ezra Kruger <ekruges@users.noreply.github.com>
+Date: Mon, 27 Jul 2026 02:24:27 -0400
+Subject: [PATCH 3/7] floating: edge snap preview and snap-on-drop in the drag
+ loop
+
+While dragging a floating window, reaching a workarea edge shows a
+solid preview rectangle in the focused titlebar background color
+(stacked just below the dragged window) for the target region: halves
+at the sides, fullscreen-size at the top, quarters at the corners.
+Dropping there snaps the window to that exact rect. Preview work is
+skipped entirely on motion frames where the region is unchanged.
+---
+ src/floating.c | 133 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 133 insertions(+)
+
+diff --git a/src/floating.c b/src/floating.c
+index 4bf778ec..fec1419b 100644
+--- a/src/floating.c
++++ b/src/floating.c
+@@ -568,6 +568,123 @@ void floating_move_to_pointer(Con *con) {
+     floating_reposition(con, (Rect){x, y, con->rect.width, con->rect.height});
+ }
+ 
++/*
++ * Edge snapping while dragging: when the pointer reaches a workarea edge,
++ * a solid preview rectangle in the focused titlebar color is shown below
++ * the dragged window (the classic outline-drag feedback, filled), and the
++ * window snaps to that region on drop.
++ *
++ */
++typedef enum {
++    SNAP_NONE = 0,
++    SNAP_LEFT,
++    SNAP_RIGHT,
++    SNAP_MAX,
++    SNAP_TL,
++    SNAP_TR,
++    SNAP_BL,
++    SNAP_BR
++} snap_region_t;
++
++static snap_region_t snap_current = SNAP_NONE;
++static xcb_window_t snap_preview = XCB_NONE;
++
++static snap_region_t snap_region_at(Rect wa, uint32_t px, uint32_t py) {
++    const int m = logical_px(10);
++    const bool left = (int)px <= (int)wa.x + m;
++    const bool right = (int)px >= (int)(wa.x + wa.width) - m;
++    const bool top = (int)py <= (int)wa.y + m;
++    const bool bottom = (int)py >= (int)(wa.y + wa.height) - m;
++    if (top && left) {
++        return SNAP_TL;
++    } else if (top && right) {
++        return SNAP_TR;
++    } else if (bottom && left) {
++        return SNAP_BL;
++    } else if (bottom && right) {
++        return SNAP_BR;
++    } else if (left) {
++        return SNAP_LEFT;
++    } else if (right) {
++        return SNAP_RIGHT;
++    } else if (top) {
++        return SNAP_MAX;
++    }
++    return SNAP_NONE;
++}
++
++static Rect snap_region_rect(Rect wa, snap_region_t region) {
++    const uint32_t hw = wa.width / 2;
++    const uint32_t hh = wa.height / 2;
++    switch (region) {
++        case SNAP_LEFT:
++            return (Rect){wa.x, wa.y, hw, wa.height};
++        case SNAP_RIGHT:
++            return (Rect){wa.x + hw, wa.y, wa.width - hw, wa.height};
++        case SNAP_MAX:
++            return (Rect){wa.x, wa.y, wa.width, wa.height};
++        case SNAP_TL:
++            return (Rect){wa.x, wa.y, hw, hh};
++        case SNAP_TR:
++            return (Rect){wa.x + hw, wa.y, wa.width - hw, hh};
++        case SNAP_BL:
++            return (Rect){wa.x, wa.y + hh, hw, wa.height - hh};
++        case SNAP_BR:
++            return (Rect){wa.x + hw, wa.y + hh, wa.width - hw, wa.height - hh};
++        default:
++            return (Rect){0, 0, 0, 0};
++    }
++}
++
++static void snap_preview_update(Con *con, snap_region_t region) {
++    /* No work per motion frame unless the region actually changed. */
++    if (region == snap_current) {
++        return;
++    }
++    if (region == SNAP_NONE) {
++        if (snap_preview != XCB_NONE) {
++            xcb_unmap_window(conn, snap_preview);
++            xcb_flush(conn);
++        }
++        snap_current = SNAP_NONE;
++        return;
++    }
++    Con *ws = con_get_workspace(con);
++    if (ws == NULL) {
++        return;
++    }
++    const Rect r = snap_region_rect(ws->rect, region);
++    if (snap_preview == XCB_NONE) {
++        snap_preview = xcb_generate_id(conn);
++        uint32_t mask = XCB_CW_BACK_PIXEL | XCB_CW_OVERRIDE_REDIRECT;
++        uint32_t values[] = {config.client.focused.background.colorpixel, 1};
++        xcb_create_window(conn, XCB_COPY_FROM_PARENT, snap_preview, root,
++                          r.x, r.y, r.width, r.height, 0,
++                          XCB_WINDOW_CLASS_INPUT_OUTPUT, XCB_COPY_FROM_PARENT,
++                          mask, values);
++    }
++    uint32_t cfg[] = {(uint32_t)r.x, (uint32_t)r.y, r.width, r.height,
++                      con->frame.id, XCB_STACK_MODE_BELOW};
++    xcb_configure_window(conn, snap_preview,
++                         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
++                             XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT |
++                             XCB_CONFIG_WINDOW_SIBLING | XCB_CONFIG_WINDOW_STACK_MODE,
++                         cfg);
++    if (snap_current == SNAP_NONE) {
++        xcb_map_window(conn, snap_preview);
++    }
++    snap_current = region;
++    xcb_flush(conn);
++}
++
++static void snap_preview_hide(void) {
++    if (snap_preview != XCB_NONE) {
++        xcb_destroy_window(conn, snap_preview);
++        snap_preview = XCB_NONE;
++    }
++    snap_current = SNAP_NONE;
++}
++
+ DRAGGING_CB(drag_window_callback) {
+     /* Reposition the client correctly while moving */
+     con->rect.x = old_rect->x + (new_x - event->root_x);
+@@ -577,6 +694,11 @@ DRAGGING_CB(drag_window_callback) {
+     x_push_node(con);
+     xcb_flush(conn);
+ 
++    Con *snap_ws = con_get_workspace(con);
++    if (snap_ws != NULL) {
++        snap_preview_update(con, snap_region_at(snap_ws->rect, new_x, new_y));
++    }
++
+     /* Check if we cross workspace boundaries while moving */
+     if (!floating_maybe_reassign_ws(con)) {
+         return;
+@@ -604,6 +726,9 @@ void floating_drag_window(Con *con, const xcb_button_press_event_t *event, bool
+     /* Drag the window */
+     drag_result_t drag_result = drag_pointer(con, event, XCB_NONE, XCURSOR_CURSOR_MOVE, use_threshold, drag_window_callback, NULL);
+ 
++    const snap_region_t drop_region = snap_current;
++    snap_preview_hide();
++
+     if (!con_exists(con)) {
+         DLOG("The container has been closed in the meantime.\n");
+         return;
+@@ -615,6 +740,14 @@ void floating_drag_window(Con *con, const xcb_button_press_event_t *event, bool
+         return;
+     }
+ 
++    /* Dropped with the pointer at a workarea edge: snap to that region. */
++    if (drop_region != SNAP_NONE) {
++        Con *ws = con_get_workspace(con);
++        if (ws != NULL) {
++            floating_reposition(con, snap_region_rect(ws->rect, drop_region));
++        }
++    }
++
+     /* If this is a scratchpad window, don't auto center it from now on. */
+     if (con->scratchpad_state == SCRATCHPAD_FRESH) {
+         con->scratchpad_state = SCRATCHPAD_CHANGED;
+-- 
+2.39.5
+

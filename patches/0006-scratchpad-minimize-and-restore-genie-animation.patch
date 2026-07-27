@@ -1,0 +1,174 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ezra Kruger <ekruges@users.noreply.github.com>
+Date: Mon, 27 Jul 2026 06:31:00 -0400
+Subject: [PATCH 6/7] scratchpad: minimize and restore genie animation
+
+A hollow outline box in the focused border color slides from the
+window down to the chip area on minimize and back on restore, about
+220ms, shape-extension only, no compositor needed. I3PSYCHO_GENIE_MS
+overrides the duration; 0 disables.
+---
+ include/floating.h |  8 +++++++
+ src/floating.c     | 53 ++++++++++++++++++++++++++++++++++++++++++++++
+ src/handlers.c     |  8 +++----
+ src/scratchpad.c   | 28 ++++++++++++++++++++++++
+ 4 files changed, 92 insertions(+), 5 deletions(-)
+
+diff --git a/include/floating.h b/include/floating.h
+index 781bb130..9278a855 100644
+--- a/include/floating.h
++++ b/include/floating.h
+@@ -107,6 +107,14 @@ void floating_check_size(Con *floating_con, bool prefer_height);
+  */
+ bool floating_reposition(Con *con, Rect newrect);
+ 
++/**
++ * Animates a hollow outline rectangle between the two rects (the classic
++ * minimize/restore genie box). Blocks for the duration (~220ms default,
++ * I3PSYCHO_GENIE_MS overrides, 0 disables).
++ *
++ */
++void floating_genie_animate(Rect from, Rect to);
++
+ /**
+  * Sets size of the CT_FLOATING_CON to specified dimensions. Might limit the
+  * actual size with regard to size constraints taken from user settings.
+diff --git a/src/floating.c b/src/floating.c
+index fec1419b..39c70917 100644
+--- a/src/floating.c
++++ b/src/floating.c
+@@ -685,6 +685,59 @@ static void snap_preview_hide(void) {
+     snap_current = SNAP_NONE;
+ }
+ 
++void floating_genie_animate(Rect from, Rect to) {
++    int duration_ms = 220;
++    const char *env = getenv("I3PSYCHO_GENIE_MS");
++    if (env != NULL) {
++        duration_ms = atoi(env);
++    }
++    if (duration_ms <= 0) {
++        return;
++    }
++    const int frames = 12;
++    const int thick = logical_px(2);
++
++    xcb_window_t ghost = xcb_generate_id(conn);
++    uint32_t mask = XCB_CW_BACK_PIXEL | XCB_CW_OVERRIDE_REDIRECT;
++    uint32_t values[] = {config.client.focused.border.colorpixel, 1};
++    xcb_create_window(conn, XCB_COPY_FROM_PARENT, ghost, root,
++                      from.x, from.y, from.width, from.height, 0,
++                      XCB_WINDOW_CLASS_INPUT_OUTPUT, XCB_COPY_FROM_PARENT,
++                      mask, values);
++
++    for (int i = 0; i <= frames; i++) {
++        const double t = (double)i / frames;
++        const Rect r = {
++            from.x + (int)(((int)to.x - (int)from.x) * t),
++            from.y + (int)(((int)to.y - (int)from.y) * t),
++            (uint32_t)max(4, (int)from.width + (int)(((int)to.width - (int)from.width) * t)),
++            (uint32_t)max(4, (int)from.height + (int)(((int)to.height - (int)from.height) * t)),
++        };
++        const uint16_t w = r.width, h = r.height;
++        xcb_rectangle_t strips[4] = {
++            {0, 0, w, (uint16_t)thick},
++            {0, (int16_t)(h - thick), w, (uint16_t)thick},
++            {0, 0, (uint16_t)thick, h},
++            {(int16_t)(w - thick), 0, (uint16_t)thick, h},
++        };
++        xcb_shape_rectangles(conn, XCB_SHAPE_SO_SET, XCB_SHAPE_SK_BOUNDING,
++                             XCB_CLIP_ORDERING_UNSORTED, ghost, 0, 0, 4, strips);
++        uint32_t cfg[] = {(uint32_t)r.x, (uint32_t)r.y, w, h, XCB_STACK_MODE_ABOVE};
++        xcb_configure_window(conn, ghost,
++                             XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
++                                 XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT |
++                                 XCB_CONFIG_WINDOW_STACK_MODE,
++                             cfg);
++        if (i == 0) {
++            xcb_map_window(conn, ghost);
++        }
++        xcb_flush(conn);
++        usleep((duration_ms * 1000) / frames);
++    }
++    xcb_destroy_window(conn, ghost);
++    xcb_flush(conn);
++}
++
+ DRAGGING_CB(drag_window_callback) {
+     /* Reposition the client correctly while moving */
+     con->rect.x = old_rect->x + (new_x - event->root_x);
+diff --git a/src/handlers.c b/src/handlers.c
+index 8b72ceb0..f2c9229d 100644
+--- a/src/handlers.c
++++ b/src/handlers.c
+@@ -847,11 +847,9 @@ static void handle_client_message(xcb_client_message_event_t *event) {
+     } else if (event->type == A_WM_CHANGE_STATE) {
+         /* http://tronche.com/gui/x/icccm/sec-4.html#s-4.1.4 */
+         if (event->data.data32[0] == XCB_ICCCM_WM_STATE_ICONIC) {
+-            /* Iconify means scratchpad here, so honor the request: this is
+-             * what makes in-app minimize buttons work. Acknowledging with
+-             * WM_STATE Iconic also avoids the stuck-paused-state problem
+-             * upstream works around by rejecting (e.g. Wine): the map path
+-             * in x_push_node() restores WM_STATE Normal on show. */
++            /* Iconify means scratchpad here; honoring the request is what
++             * makes in-app minimize buttons work. The unmap path sets
++             * WM_STATE Iconic, the map path restores Normal. */
+             Con *con = con_by_window_id(event->window);
+             if (con != NULL && con->window != NULL) {
+                 DLOG("Client requested iconic state, moving to scratchpad. (window = %08x)\n", event->window);
+diff --git a/src/scratchpad.c b/src/scratchpad.c
+index b323a803..8288fcda 100644
+--- a/src/scratchpad.c
++++ b/src/scratchpad.c
+@@ -32,6 +32,7 @@ void scratchpad_move(Con *con) {
+     DLOG("should move con %p to __i3_scratch\n", con);
+ 
+     Con *__i3_scratch = workspace_get("__i3_scratch");
++    Con *genie_ws = con_get_workspace(con);
+     if (con_get_workspace(con) == __i3_scratch) {
+         DLOG("This window is already on __i3_scratch.\n");
+         return;
+@@ -53,6 +54,20 @@ void scratchpad_move(Con *con) {
+         con = maybe_floating_con;
+     }
+ 
++    /* The classic minimize genie: an outline box slides down toward the
++     * taskbar chips. */
++    if (genie_ws != NULL && !con_is_internal(genie_ws)) {
++        int idx = 0;
++        Con *count_walk;
++        TAILQ_FOREACH (count_walk, &(__i3_scratch->floating_head), floating_windows) {
++            idx++;
++        }
++        const Rect target = {genie_ws->rect.x + logical_px(16) + idx * logical_px(28),
++                             genie_ws->rect.y + genie_ws->rect.height - logical_px(20),
++                             (uint32_t)logical_px(24), (uint32_t)logical_px(18)};
++        floating_genie_animate(con->rect, target);
++    }
++
+     /* 2: Send the window to the __i3_scratch workspace, mainting its
+      * coordinates and not warping the pointer. */
+     con_move_to_workspace(con, __i3_scratch, true, true, false);
+@@ -211,6 +226,19 @@ bool scratchpad_show(Con *con) {
+         floating_center(con, con_get_workspace(con)->rect);
+     }
+ 
++    /* Reverse genie on restore: the outline box slides back up into place. */
++    {
++        int idx = 0;
++        Con *count_walk;
++        TAILQ_FOREACH (count_walk, &(__i3_scratch->floating_head), floating_windows) {
++            idx++;
++        }
++        const Rect source = {active->rect.x + logical_px(16) + idx * logical_px(28),
++                             active->rect.y + active->rect.height - logical_px(20),
++                             (uint32_t)logical_px(24), (uint32_t)logical_px(18)};
++        floating_genie_animate(source, con->rect);
++    }
++
+     /* Activate active workspace if window is from another workspace to ensure
+      * proper focus. */
+     if (current != active) {
+-- 
+2.39.5
+

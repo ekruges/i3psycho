@@ -358,7 +358,7 @@ def drop_worker():
             continue
         now = time.monotonic()
         if HOT_CORNERS:
-            poll_hot_corner(wconn, hot, tree.rect, now)
+            poll_hot_corner(wconn, hot, output_rects(tree), now)
         # butter: poll fast only while something is (or just was) moving
         active = bool(moving) or any(now - t < 1.0 for t in moving_hint.values())
         interval = 0.15 if active else 0.6
@@ -406,7 +406,13 @@ def drop_worker():
                     min_stack.remove(cid)
 
 
-def poll_hot_corner(wconn, st, root_rect, now):
+def output_rects(tree):
+    """Rect of every active output. Corners belong to a screen, not to the X
+    root window that happens to enclose all of them."""
+    return [o.rect for o in tree.nodes if o.name != "__i3" and o.rect.width]
+
+
+def poll_hot_corner(wconn, st, rects, now):
     # xdotool subprocess per poll; swap for python-xlib if it ever matters
     try:
         out = subprocess.run(["xdotool", "getmouselocation", "--shell"],
@@ -415,10 +421,23 @@ def poll_hot_corner(wconn, st, root_rect, now):
         x, y = int(pos["X"]), int(pos["Y"])
     except Exception:
         return
+    # Corners used to be tested against the whole X root window, which is the
+    # bounding box of every monitor. With two side-by-side outputs of different
+    # heights that makes most corners unreachable: on a 3000x2000 laptop plus a
+    # 1024x768 screen at +3000, the root is 4024x2000, so "bottom-right" wants
+    # x >= 4022 and y >= 1998 -- x only reaches that on the short output, where
+    # y stops at 767. The default br=showdesktop corner could never fire. Test
+    # against the output the pointer is on, so every screen has four corners.
+    r = next((o for o in rects
+              if o.x <= x < o.x + o.width and o.y <= y < o.y + o.height), None)
+    if r is None:
+        st.update(corner=None, since=0.0, armed=True)
+        return
     m = 1
-    at_l, at_t = x <= m, y <= m
-    at_r = x >= root_rect.width - 1 - m
-    at_b = y >= root_rect.height - 1 - m
+    at_l = x <= r.x + m
+    at_t = y <= r.y + m
+    at_r = x >= r.x + r.width - 1 - m
+    at_b = y >= r.y + r.height - 1 - m
     corner = ("tl" if at_l and at_t else "tr" if at_r and at_t else
               "bl" if at_l and at_b else "br" if at_r and at_b else None)
     if corner is None:

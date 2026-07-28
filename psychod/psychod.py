@@ -443,6 +443,15 @@ def slide(wid, show):
     b = bars[wid]
     y0, y1 = bar_y(b, b["shown"]), bar_y(b, show)
     b["shown"] = show
+    if show:
+        # a fullscreen window sits above an override-redirect bar, so revealing
+        # one without raising it slides it in behind the window -- and the
+        # buttons on it are the way out of fullscreen
+        try:
+            subprocess.run(["xdotool", "windowraise", str(wid)],
+                           capture_output=True, timeout=1)
+        except Exception:
+            pass
     steps = max(1, ARGS.bar_slide_ms // 20)
     for i in range(1, steps + 1):
         move_bar(wid, b["x"], y0 + (y1 - y0) * i // steps)

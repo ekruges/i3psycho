@@ -5,6 +5,6 @@ cd "$(dirname "$0")"
 cp ../psychod/psychod.py .
 cp ../dist/psycho.conf ../dist/psycho.config ../dist/picom.conf ../dist/i3status.conf .
 cp ../man/psychod.1 ../userguide.txt .
-cp ../contrib/psycho-chips-polybar.py .
+cp ../contrib/psycho-chips-polybar.py ../contrib/psycho-wincontrols-polybar.py .
 cp ../patches/00*.patch .
 echo "staged; now: makepkg -si"

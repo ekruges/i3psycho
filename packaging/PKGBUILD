@@ -1,5 +1,5 @@
 # Maintainer: Ezra Kruger <kruger.ezra.s@gmail.com>
-# i3psycho: floating-first i3. Patched i3 (7 patches on a pinned upstream) +
+# i3psycho: floating-first i3. Patched i3 (8 patches on a pinned upstream) +
 # the psychod companion daemon. Follows the i3-gaps packaging model.
 pkgname=i3psycho
 pkgver=1.1.0
@@ -30,11 +30,12 @@ source=("i3::git+https://github.com/i3/i3#tag=${_i3_tag}"
         '0005-ipc-i3bar-taskbar-chips-for-minimized-windows.patch'
         '0006-scratchpad-minimize-and-restore-genie-animation.patch'
         '0007-config-psycho_-directives.patch'
+        '0008-config-psycho_exact_size-and-psycho_drag_threshold.patch'
         'psychod.py' 'psycho.conf' 'psycho.config'
         'picom.conf' 'i3status.conf' 'psychod.1'
         'i3psycho.desktop' 'i3psycho-session' 'userguide.txt'
         'i3psycho-doctor' 'psycho-chips-polybar.py')
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 
 prepare() {
   cd i3

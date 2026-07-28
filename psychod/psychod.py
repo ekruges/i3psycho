@@ -26,6 +26,10 @@ ap.add_argument("--edge-margin", type=int, default=25,
 ap.add_argument("--drop-debounce", type=float, default=0.25)
 ap.add_argument("--hot-corners", default="tl=expose,br=showdesktop",
                 help='corner=action pairs ("tl=expose,br=showdesktop"), or "none"')
+ap.add_argument("--hot-corner-size", type=int, default=8,
+                help="px square at each corner that arms a hot corner")
+ap.add_argument("--hot-corner-delay", type=float, default=0.5,
+                help="seconds the pointer must rest in the corner")
 ap.add_argument("--auto-hide-bars", default="none",
                 help='edges whose bar hides until hovered: "top", "bottom", '
                      '"top,bottom", or "none"')
@@ -518,7 +522,9 @@ def poll_hot_corner(wconn, st, rects, now):
     if r is None:
         st.update(corner=None, since=0.0, armed=True)
         return
-    m = 1
+    # a 1px target is unhittable in practice: the pointer has to land on the
+    # single outermost pixel, and any acceleration overshoots it
+    m = max(1, ARGS.hot_corner_size)
     at_l = x <= r.x + m
     at_t = y <= r.y + m
     at_r = x >= r.x + r.width - 1 - m
@@ -531,7 +537,8 @@ def poll_hot_corner(wconn, st, rects, now):
     if corner != st["corner"]:
         st.update(corner=corner, since=now)
         return
-    if st["armed"] and now - st["since"] >= 0.5 and corner in HOT_CORNERS:
+    if (st["armed"] and now - st["since"] >= ARGS.hot_corner_delay
+            and corner in HOT_CORNERS):
         st["armed"] = False          # re-arms when the pointer leaves
         wconn.send_tick(f"psycho:{HOT_CORNERS[corner]}")
 

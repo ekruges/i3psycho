@@ -1,0 +1,162 @@
+From 5d9a9373158cc963a241ffe4a797aabf2ee1b9bc Mon Sep 17 00:00:00 2001
+From: Ezra Kruger <ekruges@users.noreply.github.com>
+Date: Mon, 27 Jul 2026 20:44:32 -0400
+Subject: [PATCH] config: psycho_exact_size and psycho_drag_threshold
+
+Two things that keep floating windows from feeling direct.
+
+Resize increments round a snapped window down by up to one character cell,
+so a terminal snapped to the bottom half stops short of the screen edge with
+a visible strip of desktop under it -- the point of snapping is that the
+region is filled. Size hints are advisory and most floating WMs ignore the
+increment for programmatic resizes. psycho_exact_size (default yes) skips
+the rounding; set it to no for stock behavior.
+
+Dragging did not start until the pointer moved logical_px(15). On a HiDPI
+screen that is a 30px dead zone followed by a jump, which reads as lag.
+psycho_drag_threshold sets it in device px (default 1); 0 makes the window
+track the pointer from the first motion event.
+---
+ include/config_directives.h |  2 ++
+ include/configuration.h     |  2 ++
+ parser-specs/config.spec    | 12 ++++++++++++
+ src/config.c                |  2 ++
+ src/config_directives.c     |  8 ++++++++
+ src/drag.c                  | 10 ++++++++--
+ src/floating.c              |  8 ++++++--
+ 7 files changed, 40 insertions(+), 4 deletions(-)
+
+diff --git a/include/config_directives.h b/include/config_directives.h
+index 30ca2126..4c315c7f 100644
+--- a/include/config_directives.h
++++ b/include/config_directives.h
+@@ -58,6 +58,8 @@ CFGFUN(psycho_double_click_titlebar, const char *value);
+ CFGFUN(psycho_snap_edges, const char *value);
+ CFGFUN(psycho_snap_margin, const long margin);
+ CFGFUN(psycho_chips, const char *value);
++CFGFUN(psycho_exact_size, const char *value);
++CFGFUN(psycho_drag_threshold, const long px);
+ CFGFUN(mouse_warping, const char *value);
+ CFGFUN(focus_wrapping, const char *value);
+ CFGFUN(force_focus_wrapping, const char *value);
+diff --git a/include/configuration.h b/include/configuration.h
+index 96cbe4f0..159bcb0f 100644
+--- a/include/configuration.h
++++ b/include/configuration.h
+@@ -220,6 +220,8 @@ struct Config {
+     bool psycho_snap_edges;
+     int psycho_snap_margin;
+     bool psycho_chips;
++    bool psycho_exact_size;
++    int psycho_drag_threshold;
+ 
+     /** Title alignment options. */
+     enum {
+diff --git a/parser-specs/config.spec b/parser-specs/config.spec
+index ffc2420a..9c8b4ac9 100644
+--- a/parser-specs/config.spec
++++ b/parser-specs/config.spec
+@@ -46,6 +46,8 @@ state INITIAL:
+   'psycho_snap_edges'                      -> PSYCHO_SNAP_EDGES
+   'psycho_snap_margin'                     -> PSYCHO_SNAP_MARGIN
+   'psycho_chips'                           -> PSYCHO_CHIPS
++  'psycho_exact_size'                      -> PSYCHO_EXACT_SIZE
++  'psycho_drag_threshold'                  -> PSYCHO_DRAG_THRESHOLD
+   'mouse_warping'                          -> MOUSE_WARPING
+   'focus_wrapping'                         -> FOCUS_WRAPPING
+   'force_focus_wrapping'                   -> FORCE_FOCUS_WRAPPING
+@@ -309,6 +311,16 @@ state PSYCHO_CHIPS:
+   value = word
+       -> call cfg_psycho_chips($value)
+ 
++# psycho_exact_size bool
++state PSYCHO_EXACT_SIZE:
++  value = word
++      -> call cfg_psycho_exact_size($value)
++
++# psycho_drag_threshold <px>
++state PSYCHO_DRAG_THRESHOLD:
++  px = number
++      -> call cfg_psycho_drag_threshold(&px)
++
+ # focus_follows_mouse bool
+ state FOCUS_FOLLOWS_MOUSE:
+   value = word
+diff --git a/src/config.c b/src/config.c
+index 6dfa9f4e..d9fe0ede 100644
+--- a/src/config.c
++++ b/src/config.c
+@@ -213,6 +213,8 @@ bool load_configuration(const char *override_configpath, config_load_t load_type
+     config.psycho_snap_edges = true;
+     config.psycho_snap_margin = 10;
+     config.psycho_chips = true;
++    config.psycho_exact_size = true;
++    config.psycho_drag_threshold = 1;
+ 
+     config.default_border = BS_NORMAL;
+     config.default_floating_border = BS_NORMAL;
+diff --git a/src/config_directives.c b/src/config_directives.c
+index 3af3a0cc..0b3793f8 100644
+--- a/src/config_directives.c
++++ b/src/config_directives.c
+@@ -464,6 +464,14 @@ CFGFUN(psycho_snap_margin, const long margin) {
+     config.psycho_snap_margin = margin;
+ }
+ 
++CFGFUN(psycho_exact_size, const char *value) {
++    config.psycho_exact_size = boolstr(value);
++}
++
++CFGFUN(psycho_drag_threshold, const long px) {
++    config.psycho_drag_threshold = px;
++}
++
+ CFGFUN(psycho_chips, const char *value) {
+     config.psycho_chips = boolstr(value);
+ }
+diff --git a/src/drag.c b/src/drag.c
+index de29aa2e..a07d01b6 100644
+--- a/src/drag.c
++++ b/src/drag.c
+@@ -42,8 +42,14 @@ struct drag_x11_cb {
+ 
+ static bool threshold_exceeded(uint32_t x1, uint32_t y1,
+                                uint32_t x2, uint32_t y2) {
+-    /* The threshold is about the height of one window decoration. */
+-    const uint32_t threshold = logical_px(15);
++    /* Stock i3 waits for logical_px(15) before a drag starts, so the window
++     * does not follow the pointer at all until it does -- on a HiDPI screen
++     * that is a 30px dead zone, then a jump. psycho_drag_threshold sets it in
++     * device px; 0 makes the window track the pointer from the first motion. */
++    const uint32_t threshold = config.psycho_drag_threshold;
++    if (threshold == 0) {
++        return true;
++    }
+     return (x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2) > threshold * threshold;
+ }
+ 
+diff --git a/src/floating.c b/src/floating.c
+index 1918d306..393ce3b9 100644
+--- a/src/floating.c
++++ b/src/floating.c
+@@ -167,14 +167,18 @@ void floating_check_size(Con *floating_con, bool prefer_height) {
+             }
+         }
+ 
+-        if (window->height_increment &&
++        /* Resize increments round a snapped window down by up to one cell,
++         * which leaves a visible gap against the screen edge -- the whole point
++         * of snapping is that the region is filled exactly. Hints are advisory;
++         * most floating WMs ignore the increment for programmatic resizes. */
++        if (!config.psycho_exact_size && window->height_increment &&
+             floating_con->rect.height >= base_height + border_rect.height) {
+             floating_con->rect.height -= base_height + border_rect.height;
+             floating_con->rect.height -= floating_con->rect.height % window->height_increment;
+             floating_con->rect.height += base_height + border_rect.height;
+         }
+ 
+-        if (window->width_increment &&
++        if (!config.psycho_exact_size && window->width_increment &&
+             floating_con->rect.width >= base_width + border_rect.width) {
+             floating_con->rect.width -= base_width + border_rect.width;
+             floating_con->rect.width -= floating_con->rect.width % window->width_increment;

@@ -1,10 +1,19 @@
 i3psycho 1.1
 ============
 
-Auto-hiding bars, and the fixes from putting 1.0 on a real desktop that
-already had an i3 config.
+Auto-hiding bars, exact snapping, direct dragging, and the fixes from
+putting 1.0 on a real desktop that already had an i3 config.
 
 New:
+ - psycho_exact_size (default yes): resize increments rounded a snapped
+   window down by up to one character cell, so a terminal snapped to the
+   bottom half stopped short of the edge with a strip of desktop showing.
+   Hints are advisory; the region gets filled. Set no for stock behavior.
+ - psycho_drag_threshold (default 1px): dragging did not start until the
+   pointer moved logical_px(15) -- a 30px dead zone at Xft.dpi 192, then a
+   jump. 0 tracks the pointer from the first motion event.
+ - psychod --hot-corner-size (default 8) and --hot-corner-delay (0.5).
+   The corner target was one pixel, which no one can hit on purpose.
  - psychod --auto-hide-bars top|bottom|top,bottom parks the bar off-screen
    and slides it back when the pointer touches that edge. --bar-slide-ms
    sets the duration (140 default, 0 disables), --bar-class picks the bars.

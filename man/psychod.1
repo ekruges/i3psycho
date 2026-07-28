@@ -7,6 +7,8 @@ psychod \- companion daemon for i3psycho, the floating-first i3
 [\fB\-\-edge\-margin\fR \fIN\fR]
 [\fB\-\-drop\-debounce\fR \fIS\fR]
 [\fB\-\-hot\-corners\fR \fISPEC\fR]
+[\fB\-\-hot\-corner\-size\fR \fIN\fR]
+[\fB\-\-hot\-corner\-delay\fR \fIS\fR]
 [\fB\-\-auto\-hide\-bars\fR \fIEDGES\fR]
 [\fB\-\-bar\-class\fR \fIREGEX\fR]
 [\fB\-\-bar\-slide\-ms\fR \fIN\fR]
@@ -43,6 +45,13 @@ Seconds a moved window must rest before snapping (default 0.25).
 .BR \-\-hot\-corners " " \fISPEC\fR
 Comma-separated corner=action pairs from tl, tr, bl, br (default
 "tl=expose,br=showdesktop"), or "none" to disable. Requires xdotool.
+.TP
+.BR \-\-hot\-corner\-size " " \fIN\fR
+Size in px of the square at each corner that arms it (default 8). One
+pixel is unhittable in practice; raise this on a HiDPI screen.
+.TP
+.BR \-\-hot\-corner\-delay " " \fIS\fR
+Seconds the pointer must rest in the corner before it fires (default 0.5).
 .TP
 .BR \-\-auto\-hide\-bars " " \fIEDGES\fR
 Edges whose bar hides until the pointer touches that edge: "top",

@@ -2,7 +2,7 @@ i3psycho User Guide
 ===================
 
 i3psycho is i3 with floating-first behavior: macOS-grade window management on
-top of an unmodified i3 core. It is a small patch series (7 patches) on
+top of an unmodified i3 core. It is a small patch series (8 patches) on
 upstream i3 plus a companion IPC daemon, `psychod`. Everything you know about
 i3 still applies: the config language, the IPC protocol, workspaces, marks,
 the scratchpad, i3bar, i3status, and your muscle memory.
@@ -165,6 +165,8 @@ Flags:
 | `--edge-margin N` | 25 | px beyond the workarea edge that triggers poll-based drop-snap |
 | `--drop-debounce S` | 0.25 | seconds a moved window must rest before snapping |
 | `--hot-corners SPEC` | `tl=expose,br=showdesktop` | `corner=action` pairs, or `none` |
+| `--hot-corner-size N` | 8 | px square at each corner that arms it; raise it on HiDPI |
+| `--hot-corner-delay S` | 0.5 | seconds the pointer must rest there |
 | `--auto-hide-bars EDGES` | `none` | `top`, `bottom`, `top,bottom`: bar hides until that edge is hovered |
 | `--bar-class REGEX` | `polybar\|i3bar` | which bars auto-hide applies to |
 | `--bar-slide-ms N` | 140 | slide duration; 0 disables the animation |
@@ -231,6 +233,19 @@ extended by events that did not fire before.
 - Measured end-to-end action latency (tick to geometry applied) in a
   2-core build container: 1.9 ms mean, 3.0 ms max.
 
+Config directives (patched i3 only; stock i3 refuses to parse them):
+
+| Directive | Default | Meaning |
+|---|---|---|
+| `psycho_titlebar_buttons` | yes | close / iconify / maximize in the titlebar |
+| `psycho_double_click_titlebar` | yes | double-click toggles fullscreen |
+| `psycho_snap_edges` | yes | live snap preview while dragging |
+| `psycho_snap_margin N` | 10 | px from the edge that shows the preview |
+| `psycho_genie_duration N` | 140 | minimize/restore ghost, ms; 0 disables |
+| `psycho_chips` | yes | minimized-window chips in i3bar |
+| `psycho_exact_size` | yes | snapped windows fill their region exactly |
+| `psycho_drag_threshold N` | 1 | px before a drag starts; 0 tracks immediately |
+
 7. Troubleshooting
 ------------------
 
@@ -248,9 +263,14 @@ extended by events that did not fire before.
   after the cascade has already placed the window, so whichever fires last
   wins. Drop the centering rule for normal windows and let the cascade own
   position; keep it for dialogs, which psychod deliberately skips.
-- A window snapped with a small gap at the bottom: its size hints
-  (terminal character cells) round the size down. Keyboard/daemon snapping
-  honors hints like every WM; the fork's drag-snap is exact.
+- A window snapped with a small gap at the bottom: its size hints (terminal
+  character cells) round the size down. `psycho_exact_size yes` (the default)
+  ignores the increment so the region is filled; set it to no to honor hints
+  like stock i3 does.
+- Dragging feels laggy or jumps when it starts: stock i3 waits for
+  logical_px(15) of movement first, which is a 30px dead zone at Xft.dpi 192.
+  Lower `psycho_drag_threshold`, or set it to 0 to track from the first
+  motion event.
 - Bug reports: include `i3 --moreversion`, your config, and
   `/tmp/psychod-*.lock` ownership. The i3 debug log workflow
   (`i3-dump-log`) works unchanged.
@@ -258,7 +278,7 @@ extended by events that did not fire before.
 8. FAQ
 ------
 
-Is this a fork? A 7-patch series on a pinned upstream i3 release (4.25.1),
+Is this a fork? An 8-patch series on a pinned upstream i3 release (4.25.1),
 rebased per release, plus a daemon that any stock i3 can also run (with
 graceful degradation). The i3-gaps model.
 

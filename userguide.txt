@@ -165,7 +165,7 @@ Flags:
 | `--edge-margin N` | 25 | px beyond the workarea edge that triggers poll-based drop-snap |
 | `--drop-debounce S` | 0.25 | seconds a moved window must rest before snapping |
 | `--hot-corners SPEC` | `tl=expose,br=showdesktop` | `corner=action` pairs, or `none` |
-| `--hot-corner-size N` | 8 | px square at each corner that arms it; raise it on HiDPI |
+| `--hot-corner-size N` | 24 | px square at each corner that arms it; raise it on HiDPI |
 | `--hot-corner-delay S` | 0.5 | seconds the pointer must rest there |
 | `--auto-hide-bars EDGES` | `none` | `top`, `bottom`, `top,bottom`: bar hides until that edge is hovered |
 | `--bar-class REGEX` | `polybar\|i3bar` | which bars auto-hide applies to |

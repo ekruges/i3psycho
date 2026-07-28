@@ -26,7 +26,7 @@ ap.add_argument("--edge-margin", type=int, default=25,
 ap.add_argument("--drop-debounce", type=float, default=0.25)
 ap.add_argument("--hot-corners", default="tl=expose,br=showdesktop",
                 help='corner=action pairs ("tl=expose,br=showdesktop"), or "none"')
-ap.add_argument("--hot-corner-size", type=int, default=8,
+ap.add_argument("--hot-corner-size", type=int, default=24,
                 help="px square at each corner that arms a hot corner")
 ap.add_argument("--hot-corner-delay", type=float, default=0.5,
                 help="seconds the pointer must rest in the corner")
@@ -192,7 +192,12 @@ def do_expose():
         return
     floats = [(next(iter(fc.leaves()), None), fc) for fc in ws.floating_nodes]
     floats = [(leaf, fc) for leaf, fc in floats if leaf is not None]
-    if len(floats) < 2:
+    if not floats:
+        # one window still exposes: it fills the single cell and toggles back.
+        # bailing at <2 made the hot corner look dead, with nothing logged --
+        # the corner had fired, expose just declined in silence.
+        print("psychod: expose: nothing to arrange on this workspace",
+              file=sys.stderr)
         return
     cols = math.ceil(math.sqrt(len(floats)))
     rows = math.ceil(len(floats) / cols)

@@ -32,15 +32,20 @@ ap.add_argument("--hot-corner-delay", type=float, default=0.5,
                 help="seconds the pointer must rest in the corner")
 ap.add_argument("--auto-hide-bars", default="none",
                 help='edges whose bar hides until hovered: "top", "bottom", '
-                     '"top,bottom", or "none"')
+                     '"top,bottom", or "none". Append =fullscreen to reveal '
+                     'only while a window on that output is fullscreen '
+                     '("top=fullscreen")')
 ap.add_argument("--bar-class", default="polybar|i3bar",
                 help="X class regex matching the bars to auto-hide")
 ap.add_argument("--bar-slide-ms", type=int, default=140,
                 help="slide duration, ms; 0 snaps with no animation")
 ARGS = ap.parse_args()
 
-AUTOHIDE = {e.strip() for e in ARGS.auto_hide_bars.split(",")
-            if e.strip() in ("top", "bottom")}
+AUTOHIDE = {}                               # edge -> "always" | "fullscreen"
+for _spec in ARGS.auto_hide_bars.split(","):
+    _edge, _, _when = _spec.strip().partition("=")
+    if _edge in ("top", "bottom"):
+        AUTOHIDE[_edge] = _when.strip() or "always"
 
 HOT_CORNERS = {}
 if ARGS.hot_corners != "none":
@@ -378,7 +383,7 @@ def drop_worker():
             if AUTOHIDE and now - bar_scan[0] > 2.0:
                 bar_scan[0] = now
                 discover_bars(rects)
-            poll_hot_corner(wconn, hot, rects, now)
+            poll_hot_corner(wconn, hot, rects, now, tree)
         # butter: poll fast only while something is (or just was) moving
         active = bool(moving) or any(now - t < 1.0 for t in moving_hint.values())
         # a hidden bar has to answer the pointer, so idle cannot be 0.6s here
@@ -496,7 +501,7 @@ def discover_bars(rects):
         edge = "top" if y + h // 2 < r.y + r.height // 2 else "bottom"
         if edge not in AUTOHIDE:
             continue
-        bars[wid] = {"edge": edge, "h": h, "x": r.x,
+        bars[wid] = {"edge": edge, "h": h, "x": r.x, "when": AUTOHIDE[edge],
                      "top": r.y, "bot": r.y + r.height, "shown": True}
         slide(wid, False)                       # bars start hidden
     for wid in list(bars):
@@ -504,8 +509,27 @@ def discover_bars(rects):
             del bars[wid]
 
 
-def poll_bars(x, y):
+def fullscreen_on(tree, bar):
+    """Is a window fullscreen on the output this bar sits on? Only leaves
+    count -- workspace containers report fullscreen_mode 1 always, so walking
+    every descendant answers yes on an idle desktop."""
+    for con in tree.leaves():
+        if not con.window or not con.fullscreen_mode:
+            continue
+        ws = con.workspace()
+        if ws is not None and ws.rect.x == bar["x"]:
+            return True
+    return False
+
+
+def poll_bars(tree, x, y):
     for wid, b in bars.items():
+        if b["when"] == "fullscreen" and not fullscreen_on(tree, b):
+            # nothing is fullscreen, so the window still has its own titlebar
+            # and its own buttons; a bar dropping into the way is just noise
+            if b["shown"]:
+                slide(wid, False)
+            continue
         if b["edge"] == "top":
             near, away = y <= b["top"], y > b["top"] + b["h"] + 8
         else:
@@ -516,7 +540,7 @@ def poll_bars(x, y):
             slide(wid, False)
 
 
-def poll_hot_corner(wconn, st, rects, now):
+def poll_hot_corner(wconn, st, rects, now, tree=None):
     # xdotool subprocess per poll; swap for python-xlib if it ever matters
     try:
         out = subprocess.run(["xdotool", "getmouselocation", "--shell"],
@@ -526,7 +550,7 @@ def poll_hot_corner(wconn, st, rects, now):
     except Exception:
         return
     if AUTOHIDE:
-        poll_bars(x, y)
+        poll_bars(tree, x, y)
     # against the output under the pointer, not the root window: the root is the
     # bounding box of every monitor, so on mismatched outputs most corners are
     # unreachable (3000x2000 + 1024x768 at +3000 puts "br" at 4022,1998, which

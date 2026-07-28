@@ -55,7 +55,10 @@ Seconds the pointer must rest in the corner before it fires (default 0.5).
 .TP
 .BR \-\-auto\-hide\-bars " " \fIEDGES\fR
 Edges whose bar hides until the pointer touches that edge: "top",
-"bottom", "top,bottom", or "none" (default). The bar must be
+"bottom", "top,bottom", or "none" (default). Append =fullscreen to an edge
+("top=fullscreen") and it only reveals while a window on that output is
+fullscreen, which is when that window has no titlebar of its own.
+The bar must be
 override-redirect, else i3 owns its placement and reverts the slide:
 polybar
 .BR "override-redirect = true" ,

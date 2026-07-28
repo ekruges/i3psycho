@@ -167,14 +167,18 @@ Flags:
 | `--hot-corners SPEC` | `tl=expose,br=showdesktop` | `corner=action` pairs, or `none` |
 | `--hot-corner-size N` | 24 | px square at each corner that arms it; raise it on HiDPI |
 | `--hot-corner-delay S` | 0.5 | seconds the pointer must rest there |
-| `--auto-hide-bars EDGES` | `none` | `top`, `bottom`, `top,bottom`: bar hides until that edge is hovered |
+| `--auto-hide-bars EDGES` | `none` | `top`, `bottom`, `top,bottom`: bar hides until that edge is hovered. `top=fullscreen` reveals only while a window is fullscreen |
 | `--bar-class REGEX` | `polybar\|i3bar` | which bars auto-hide applies to |
 | `--bar-slide-ms N` | 140 | slide duration; 0 disables the animation |
 
 Auto-hiding bars:
 
 `--auto-hide-bars bottom` parks the bar off-screen and slides it back when
-the pointer touches that edge; `top` does the same downward. The bar must be
+the pointer touches that edge; `top` does the same downward. Append
+`=fullscreen` (`--auto-hide-bars top=fullscreen`) and the edge only answers
+while a window on that output is fullscreen -- which is when the window has
+no titlebar of its own and needs somewhere else to put its buttons. The bar
+retracts by itself when the window leaves fullscreen. The bar must be
 override-redirect, or i3 owns its placement and reverts every move: polybar
 `override-redirect = true`, i3bar `mode hide`. Such a bar reserves no space,
 so windows get the whole output and the bar floats over them.

@@ -26,7 +26,7 @@ ap.add_argument("--edge-margin", type=int, default=25,
 ap.add_argument("--drop-debounce", type=float, default=0.25)
 ap.add_argument("--hot-corners", default="tl=expose,br=showdesktop",
                 help='corner=action pairs ("tl=expose,br=showdesktop"), or "none"')
-ap.add_argument("--hot-corner-size", type=int, default=24,
+ap.add_argument("--hot-corner-size", type=int, default=64,
                 help="px square at each corner that arms a hot corner")
 ap.add_argument("--hot-corner-delay", type=float, default=0.5,
                 help="seconds the pointer must rest in the corner")
@@ -561,7 +561,10 @@ def poll_hot_corner(wconn, st, rects, now, tree=None):
         st.update(corner=None, since=0.0, armed=True)
         return
     # a 1px target is unhittable in practice: the pointer has to land on the
-    # single outermost pixel, and any acceleration overshoots it
+    # single outermost pixel, and any acceleration overshoots it. going big is
+    # fine; the cost is that a large corner can cover the titlebar of a window
+    # parked near it, so raise --hot-corner-delay if it fires while you are
+    # reaching for that window's buttons
     m = max(1, ARGS.hot_corner_size)
     at_l = x <= r.x + m
     at_t = y <= r.y + m
